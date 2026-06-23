@@ -1,0 +1,2213 @@
+﻿<file name="index.js">
+import axios from 'axios';
+
+const API_BASE = '/api';
+
+const api = axios.create({
+  baseURL: API_BASE,
+  headers: { 'Content-Type': 'application/json' },
+});
+
+api.interceptors.request.use((config) => {
+  const token = localStorage.getItem('wms_token');
+  if (token) {
+    config.headers.Authorization = `Bearer ${token}`;
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (error.response?.status === 401) {
+      localStorage.removeItem('wms_token');
+      localStorage.removeItem('wms_user');
+      if (window.location.pathname !== '/login') {
+        window.location.href = '/login';
+      }
+    }
+    return Promise.reject(error);
+  }
+);
+
+export const authApi = {
+  login: (data) => api.post('/auth/login', data),
+  register: (data) => api.post('/auth/register', data),
+  getMe: () => api.get('/auth/me'),
+};
+
+export const warehouseApi = {
+  getAll: () => api.get('/warehouses'),
+  getById: (id) => api.get(`/warehouses/${id}`),
+  create: (data) => api.post('/warehouses', data),
+  update: (id, data) => api.put(`/warehouses/${id}`, data),
+  delete: (id) => api.delete(`/warehouses/${id}`),
+};
+
+export const productApi = {
+  getAll: (params) => api.get('/products', { params }),
+  getById: (id) => api.get(`/products/${id}`),
+  create: (data) => api.post('/products', data),
+  update: (id, data) => api.put(`/products/${id}`, data),
+  delete: (id) => api.delete(`/products/${id}`),
+};
+
+export const categoryApi = {
+  getAll: () => api.get('/categories'),
+  create: (data) => api.post('/categories', data),
+  update: (id, data) => api.put(`/categories/${id}`, data),
+  delete: (id) => api.delete(`/categories/${id}`),
+};
+
+export const customerApi = {
+  getAll: (params) => api.get('/customers', { params }),
+  getById: (id) => api.get(`/customers/${id}`),
+  create: (data) => api.post('/customers', data),
+  update: (id, data) => api.put(`/customers/${id}`, data),
+  delete: (id) => api.delete(`/customers/${id}`),
+};
+
+export const locationApi = {
+  getAll: (params) => api.get('/locations', { params }),
+  suggest: (params) => api.get('/locations/suggest', { params }),
+};
+
+export const inventoryApi = {
+  getPivot: () => api.get('/inventory/pivot'),
+  getByWarehouse: (params) => api.get('/inventory', { params }),
+  getStock: (productId) => api.get(`/inventory/stock/${productId}`),
+  trace: (productId) => api.get(`/inventory/trace/${productId}`),
+};
+
+export const inboundApi = {
+  getAll: (params) => api.get('/inbound', { params }),
+  getById: (id) => api.get(`/inbound/${id}`),
+  create: (data) => api.post('/inbound', data),
+  approve: (id) => api.put(`/inbound/${id}/approve`),
+  reject: (id) => api.put(`/inbound/${id}/reject`),
+  suggestBins: (params) => api.get('/inbound/suggest-bins', { params }),
+};
+
+export const outboundApi = {
+  getAll: (params) => api.get('/outbound', { params }),
+  getById: (id) => api.get(`/outbound/${id}`),
+  create: (data) => api.post('/outbound', data),
+  approve: (id) => api.put(`/outbound/${id}/approve`),
+  complete: (id) => api.put(`/outbound/${id}/complete`),
+  reject: (id) => api.put(`/outbound/${id}/reject`),
+};
+
+export const salesApi = {
+  getAll: (params) => api.get('/sales', { params }),
+  getById: (id) => api.get(`/sales/${id}`),
+  create: (data) => api.post('/sales', data),
+  approve: (id) => api.put(`/sales/${id}/approve`),
+  reject: (id) => api.put(`/sales/${id}/reject`),
+  checkStock: (params) => api.get('/sales/stock-check', { params }),
+};
+
+export const reportApi = {
+  getDashboard: () => api.get('/reports/dashboard'),
+  getInventorySummary: () => api.get('/reports/inventory-summary'),
+  getInboundSummary: (params) => api.get('/reports/inbound-summary', { params }),
+  getOutboundSummary: (params) => api.get('/reports/outbound-summary', { params }),
+  getSalesSummary: (params) => api.get('/reports/sales-summary', { params }),
+};
+
+export const userApi = {
+  getAll: () => api.get('/users'),
+  getById: (id) => api.get(`/users/${id}`),
+  update: (id, data) => api.put(`/users/${id}`, data),
+  delete: (id) => api.delete(`/users/${id}`),
+};
+
+export default api;
+
+</file>
+<file name="DataTable.jsx">
+import { useState } from 'react';
+
+export default function DataTable({ columns, data, loading, emptyMessage = 'KhÃ´ng cÃ³ dá»¯ liá»‡u', onRowClick }) {
+  if (loading) {
+    return (
+      <div className="card">
+        <div className="p-8 text-center text-gray-500">
+          <svg className="animate-spin w-6 h-6 mx-auto mb-2" fill="none" viewBox="0 0 24 24">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+          Äang táº£i dá»¯ liá»‡u...
+        </div>
+      </div>
+    );
+  }
+
+  if (!data || data.length === 0) {
+    return (
+      <div className="card">
+        <div className="p-8 text-center text-gray-400">
+          <div className="text-4xl mb-2">-</div>
+          {emptyMessage}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card overflow-hidden">
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="table-header">
+              {columns.map((col) => (
+                <th key={col.key} className="px-4 py-3 text-left font-semibold" style={{ width: col.width }}>
+                  {col.title}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {data.map((row, i) => (
+              <tr
+                key={row.id || i}
+                className={`table-row ${onRowClick ? 'cursor-pointer' : ''}`}
+                onClick={() => onRowClick && onRowClick(row)}
+              >
+                {columns.map((col) => (
+                  <td key={col.key} className="px-4 py-3 text-gray-700">
+                    {col.render ? col.render(row[col.key], row) : row[col.key]}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="Modal.jsx">
+import { useState } from 'react';
+import { X } from 'lucide-react';
+
+export default function Modal({ isOpen, onClose, title, children, size = 'md' }) {
+  if (!isOpen) return null;
+
+  const sizeClasses = {
+    sm: 'max-w-md',
+    md: 'max-w-lg',
+    lg: 'max-w-2xl',
+    xl: 'max-w-4xl',
+    full: 'max-w-6xl',
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      <div className="fixed inset-0 bg-black/40" onClick={onClose} />
+      <div className={`relative bg-white rounded-xl shadow-xl w-full ${sizeClasses[size]} max-h-[90vh] flex flex-col`}>
+        <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
+          <h3 className="font-semibold text-gray-900">{title}</h3>
+          <button onClick={onClose} className="p-1 hover:bg-gray-100 rounded-lg transition-colors">
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+        <div className="flex-1 overflow-y-auto p-5">
+          {children}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="AuthContext.jsx">
+import { createContext, useContext, useState, useEffect } from 'react';
+import { authApi } from '../api';
+
+const AuthContext = createContext(null);
+
+export const useAuth = () => {
+  const ctx = useContext(AuthContext);
+  if (!ctx) throw new Error('useAuth must be used within AuthProvider');
+  return ctx;
+};
+
+export const AuthProvider = ({ children }) => {
+  const [user, setUser] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    const token = localStorage.getItem('wms_token');
+    if (token) {
+      authApi.getMe()
+        .then(res => setUser(res.data))
+        .catch(() => {
+          localStorage.removeItem('wms_token');
+          localStorage.removeItem('wms_user');
+        })
+        .finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  const login = async (username, password) => {
+    const res = await authApi.login({ username, password });
+    const { token, user: userData } = res.data;
+    localStorage.setItem('wms_token', token);
+    localStorage.setItem('wms_user', JSON.stringify(userData));
+    setUser(userData);
+    return userData;
+  };
+
+  const logout = () => {
+    localStorage.removeItem('wms_token');
+    localStorage.removeItem('wms_user');
+    setUser(null);
+  };
+
+  const hasRole = (...roles) => user && roles.includes(user.role);
+
+  return (
+    <AuthContext.Provider value={{ user, loading, login, logout, hasRole }}>
+      {children}
+    </AuthContext.Provider>
+  );
+};
+
+</file>
+<file name="WarehouseContext.jsx">
+import { createContext, useContext, useState, useEffect } from 'react';
+import { warehouseApi } from '../api';
+
+const WarehouseContext = createContext(null);
+
+export const useWarehouse = () => {
+  const ctx = useContext(WarehouseContext);
+  if (!ctx) throw new Error('useWarehouse must be used within WarehouseProvider');
+  return ctx;
+};
+
+export const WarehouseProvider = ({ children }) => {
+  const [warehouses, setWarehouses] = useState([]);
+  const [selectedWarehouseId, setSelectedWarehouseId] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    warehouseApi.getAll()
+      .then(res => {
+        setWarehouses(res.data);
+        const saved = localStorage.getItem('wms_warehouse_id');
+        if (saved && res.data.find(w => w.id === parseInt(saved, 10))) {
+          setSelectedWarehouseId(parseInt(saved, 10));
+        } else if (res.data.length > 0) {
+          setSelectedWarehouseId(res.data[0].id);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const selectWarehouse = (id) => {
+    setSelectedWarehouseId(id);
+    localStorage.setItem('wms_warehouse_id', id);
+  };
+
+  return (
+    <WarehouseContext.Provider value={{ warehouses, selectedWarehouseId, selectWarehouse, loading }}>
+      {children}
+    </WarehouseContext.Provider>
+  );
+};
+
+</file>
+<file name="Layout.jsx">
+import { useState } from 'react';
+import { Outlet, NavLink, useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { useWarehouse } from '../contexts/WarehouseContext';
+import { getRoleLabel } from '../utils/helpers';
+import {
+  LayoutDashboard, Warehouse, Package, Tags, Users,
+  ShoppingCart, ArrowDownLeft, ArrowUpRight, ClipboardList,
+  BarChart3, Settings, LogOut, ChevronDown, Menu, X
+} from 'lucide-react';
+
+const NAV_ITEMS = [
+  { path: '/dashboard', label: 'Tá»•ng quan', icon: LayoutDashboard, roles: ['ADMIN', 'MANAGER', 'KHO', 'SALES'] },
+  { path: '/warehouses', label: 'Quáº£n lÃ½ Kho', icon: Warehouse, roles: ['ADMIN', 'MANAGER'] },
+  { path: '/products', label: 'Sáº£n pháº©m', icon: Package, roles: ['ADMIN', 'MANAGER', 'KHO', 'SALES'] },
+  { path: '/categories', label: 'Danh má»¥c', icon: Tags, roles: ['ADMIN'] },
+  { path: '/customers', label: 'KhÃ¡ch hÃ ng', icon: Users, roles: ['ADMIN', 'MANAGER', 'SALES'] },
+  { path: '/inventory', label: 'Tá»“n kho', icon: ClipboardList, roles: ['ADMIN', 'MANAGER', 'KHO'] },
+  { path: '/inbound', label: 'Nháº­p kho', icon: ArrowDownLeft, roles: ['ADMIN', 'MANAGER', 'KHO'] },
+  { path: '/outbound', label: 'Xuáº¥t kho', icon: ArrowUpRight, roles: ['ADMIN', 'MANAGER', 'KHO'] },
+  { path: '/sales', label: 'ÄÆ¡n hÃ ng', icon: ShoppingCart, roles: ['ADMIN', 'MANAGER', 'SALES'] },
+  { path: '/reports', label: 'BÃ¡o cÃ¡o', icon: BarChart3, roles: ['ADMIN', 'MANAGER'] },
+  { path: '/users', label: 'NgÆ°á»i dÃ¹ng', icon: Settings, roles: ['ADMIN'] },
+];
+
+export default function Layout() {
+  const { user, logout, hasRole } = useAuth();
+  const { warehouses, selectedWarehouseId, selectWarehouse } = useWarehouse();
+  const navigate = useNavigate();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+
+  const handleLogout = () => {
+    logout();
+    navigate('/login');
+  };
+
+  const visibleNav = NAV_ITEMS.filter(item => hasRole(...item.roles));
+
+  return (
+    <div className="flex h-screen overflow-hidden bg-gray-50">
+      {/* Sidebar */}
+      <aside className={`fixed inset-y-0 left-0 z-50 w-56 bg-white border-r border-gray-200 transform transition-transform duration-200 lg:translate-x-0 ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}`}>
+        <div className="flex items-center h-16 px-4 border-b border-gray-200">
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 bg-blue-600 rounded-lg flex items-center justify-center">
+              <Warehouse className="w-5 h-5 text-white" />
+            </div>
+            <span className="font-bold text-gray-900 text-sm">WMS</span>
+          </div>
+          <button className="ml-auto lg:hidden" onClick={() => setSidebarOpen(false)}>
+            <X className="w-5 h-5 text-gray-500" />
+          </button>
+        </div>
+
+        <nav className="mt-4 px-2 space-y-1 overflow-y-auto h-[calc(100vh-64px)]">
+          {visibleNav.map(item => (
+            <NavLink
+              key={item.path}
+              to={item.path}
+              className={({ isActive }) =>
+                `flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                  isActive
+                    ? 'bg-blue-50 text-blue-700 border-r-2 border-blue-600'
+                    : 'text-gray-600 hover:bg-gray-100 hover:text-gray-900'
+                }`
+              }
+              onClick={() => setSidebarOpen(false)}
+            >
+              <item.icon className="w-4 h-4 flex-shrink-0" />
+              {item.label}
+            </NavLink>
+          ))}
+        </nav>
+      </aside>
+
+      {/* Overlay */}
+      {sidebarOpen && (
+        <div className="fixed inset-0 z-40 bg-black/30 lg:hidden" onClick={() => setSidebarOpen(false)} />
+      )}
+
+      {/* Main */}
+      <div className="flex-1 flex flex-col lg:ml-56">
+        {/* Header */}
+        <header className="h-16 bg-white border-b border-gray-200 flex items-center justify-between px-4 lg:px-6 sticky top-0 z-30">
+          <div className="flex items-center gap-4">
+            <button className="lg:hidden" onClick={() => setSidebarOpen(true)}>
+              <Menu className="w-5 h-5 text-gray-600" />
+            </button>
+
+            {hasRole('ADMIN', 'MANAGER', 'KHO') && warehouses.length > 0 && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs text-gray-500 font-medium">KHO:</span>
+                <select
+                  value={selectedWarehouseId || ''}
+                  onChange={e => selectWarehouse(parseInt(e.target.value, 10))}
+                  className="text-sm border border-gray-200 rounded-lg px-2 py-1 bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
+                >
+                  {warehouses.map(w => (
+                    <option key={w.id} value={w.id}>{w.name}</option>
+                  ))}
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="flex items-center gap-3">
+            <div className="relative">
+              <button
+                onClick={() => setUserMenuOpen(!userMenuOpen)}
+                className="flex items-center gap-2 hover:bg-gray-100 rounded-lg px-2 py-1.5 transition-colors"
+              >
+                <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
+                  <span className="text-blue-700 font-semibold text-sm">{user?.full_name?.charAt(0) || 'U'}</span>
+                </div>
+                <div className="hidden sm:block text-left">
+                  <div className="text-sm font-medium text-gray-900">{user?.full_name}</div>
+                  <div className="text-xs text-gray-500">{getRoleLabel(user?.role)}</div>
+                </div>
+                <ChevronDown className="w-4 h-4 text-gray-400" />
+              </button>
+
+              {userMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={() => setUserMenuOpen(false)} />
+                  <div className="absolute right-0 mt-1 w-48 bg-white border border-gray-200 rounded-xl shadow-lg z-50 py-1">
+                    <div className="px-4 py-2 border-b border-gray-100">
+                      <div className="text-sm font-medium">{user?.full_name}</div>
+                      <div className="text-xs text-gray-500">{user?.email}</div>
+                    </div>
+                    <button
+                      onClick={handleLogout}
+                      className="w-full flex items-center gap-2 px-4 py-2 text-sm text-red-600 hover:bg-red-50 transition-colors"
+                    >
+                      <LogOut className="w-4 h-4" />
+                      ÄÄƒng xuáº¥t
+                    </button>
+                  </div>
+                </>
+              )}
+            </div>
+          </div>
+        </header>
+
+        {/* Page content */}
+        <main className="flex-1 overflow-y-auto p-4 lg:p-6">
+          <Outlet />
+        </main>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="CategoriesPage.jsx">
+import { useState, useEffect } from 'react';
+import { categoryApi } from '../api';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, Edit, Trash2, Tags } from 'lucide-react';
+
+export default function CategoriesPage() {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+
+  const fetchData = () => {
+    setLoading(true);
+    categoryApi.getAll().then(r => setData(r.data)).catch(() => toast.error('Lá»—i táº£i danh má»¥c')).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  const handleSave = async (formData) => {
+    try {
+      if (modal.mode === 'create') {
+        await categoryApi.create(formData);
+        toast.success('Táº¡o danh má»¥c thÃ nh cÃ´ng!');
+      } else {
+        await categoryApi.update(modal.data.id, formData);
+        toast.success('Cáº­p nháº­t thÃ nh cÃ´ng!');
+      }
+      setModal({ open: false, mode: 'create', data: null });
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Lá»—i khi lÆ°u.');
+    }
+  };
+
+  const handleDelete = async (row) => {
+    if (!confirm(`XÃ³a danh má»¥c "${row.name}"?`)) return;
+    try {
+      await categoryApi.delete(row.id);
+      toast.success('XÃ³a thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'XÃ³a tháº¥t báº¡i.');
+    }
+  };
+
+  const columns = [
+    { key: 'name', title: 'TÃªn danh má»¥c', render: v => <span className="font-medium text-gray-900">{v}</span> },
+    { key: 'description', title: 'MÃ´ táº£', render: v => v || <span className="text-gray-400">-</span> },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '100px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          <button onClick={e => { e.stopPropagation(); setModal({ open: true, mode: 'edit', data: row }); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-blue-600"><Edit className="w-4 h-4" /></button>
+          <button onClick={e => { e.stopPropagation(); handleDelete(row); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">Danh má»¥c sáº£n pháº©m</h1>
+          <p className="text-sm text-gray-500 mt-1">PhÃ¢n loáº¡i hÃ ng hÃ³a theo nhÃ³m</p>
+        </div>
+        <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+          <Plus className="w-4 h-4" /> ThÃªm danh má»¥c
+        </button>
+      </div>
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ danh má»¥c nÃ o." />
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title={modal.mode === 'create' ? 'ThÃªm danh má»¥c' : 'Sá»­a danh má»¥c'} size="sm">
+        <CategoryForm initialData={modal.data} onSave={handleSave} onCancel={() => setModal({ open: false })} />
+      </Modal>
+    </div>
+  );
+}
+
+function CategoryForm({ initialData, onSave, onCancel }) {
+  const [form, setForm] = useState({ name: initialData?.name || '', description: initialData?.description || '' });
+  return (
+    <div className="space-y-4">
+      <div><label className="label-field">TÃªn danh má»¥c *</label><input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
+      <div><label className="label-field">MÃ´ táº£</label><textarea className="input-field" rows="3" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} /></div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={() => form.name.trim() && onSave(form)} className="btn-primary" disabled={!form.name.trim()}>LÆ°u</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="CustomersPage.jsx">
+import { useState, useEffect } from 'react';
+import { customerApi } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, Users, Edit, Trash2 } from 'lucide-react';
+
+export default function CustomersPage() {
+  const { hasRole } = useAuth();
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+
+  const fetchData = () => {
+    setLoading(true);
+    customerApi.getAll({ search }).then(r => setData(r.data)).catch(() => toast.error('Lá»—i táº£i khÃ¡ch hÃ ng')).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, [search]);
+
+  const handleSave = async (formData) => {
+    try {
+      if (modal.mode === 'create') {
+        await customerApi.create(formData);
+        toast.success('Táº¡o khÃ¡ch hÃ ng thÃ nh cÃ´ng!');
+      } else {
+        await customerApi.update(modal.data.id, formData);
+        toast.success('Cáº­p nháº­t thÃ nh cÃ´ng!');
+      }
+      setModal({ open: false, mode: 'create', data: null });
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Lá»—i khi lÆ°u.');
+    }
+  };
+
+  const handleDelete = async (row) => {
+    if (!confirm(`XÃ³a khÃ¡ch hÃ ng "${row.name}"?`)) return;
+    try {
+      await customerApi.delete(row.id);
+      toast.success('XÃ³a thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'XÃ³a tháº¥t báº¡i.');
+    }
+  };
+
+  const columns = [
+    { key: 'customer_code', title: 'MÃ£ KH', render: v => <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded font-mono">{v}</code> },
+    { key: 'name', title: 'TÃªn khÃ¡ch hÃ ng', render: v => <span className="font-medium text-gray-900">{v}</span> },
+    { key: 'phone', title: 'Äiá»‡n thoáº¡i' },
+    { key: 'email', title: 'Email', render: v => v || <span className="text-gray-400">-</span> },
+    { key: 'address', title: 'Äá»‹a chá»‰', render: v => v || <span className="text-gray-400">-</span> },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '100px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          {hasRole('ADMIN', 'SALES') && (
+            <>
+              <button onClick={e => { e.stopPropagation(); setModal({ open: true, mode: 'edit', data: row }); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-blue-600"><Edit className="w-4 h-4" /></button>
+              {hasRole('ADMIN') && <button onClick={e => { e.stopPropagation(); handleDelete(row); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>}
+            </>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">KhÃ¡ch hÃ ng</h1>
+          <p className="text-sm text-gray-500 mt-1">Danh sÃ¡ch Ä‘á»‘i tÃ¡c, Ä‘áº¡i lÃ½, khÃ¡ch sá»‰</p>
+        </div>
+        {hasRole('ADMIN', 'SALES') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> ThÃªm khÃ¡ch hÃ ng
+          </button>
+        )}
+      </div>
+      <div className="flex gap-3">
+        <input className="input-field max-w-xs" placeholder="TÃ¬m kiáº¿m tÃªn, mÃ£ KH, SÄT..." value={search} onChange={e => setSearch(e.target.value)} />
+      </div>
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ khÃ¡ch hÃ ng nÃ o." />
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title={modal.mode === 'create' ? 'ThÃªm khÃ¡ch hÃ ng' : 'Sá»­a khÃ¡ch hÃ ng'} size="md">
+        <CustomerForm initialData={modal.data} onSave={handleSave} onCancel={() => setModal({ open: false })} />
+      </Modal>
+    </div>
+  );
+}
+
+function CustomerForm({ initialData, onSave, onCancel }) {
+  const [form, setForm] = useState({
+    name: initialData?.name || '',
+    phone: initialData?.phone || '',
+    email: initialData?.email || '',
+    address: initialData?.address || '',
+  });
+  return (
+    <div className="space-y-4">
+      <div><label className="label-field">TÃªn khÃ¡ch hÃ ng *</label><input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} /></div>
+      <div className="grid grid-cols-2 gap-4">
+        <div><label className="label-field">Äiá»‡n thoáº¡i</label><input className="input-field" value={form.phone} onChange={e => setForm({ ...form, phone: e.target.value })} /></div>
+        <div><label className="label-field">Email</label><input type="email" className="input-field" value={form.email} onChange={e => setForm({ ...form, email: e.target.value })} /></div>
+      </div>
+      <div><label className="label-field">Äá»‹a chá»‰</label><textarea className="input-field" rows="2" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} /></div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={() => form.name.trim() && onSave(form)} className="btn-primary" disabled={!form.name.trim()}>LÆ°u</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="DashboardPage.jsx">
+import { useState, useEffect } from 'react';
+import { reportApi } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import { formatCurrency } from '../utils/helpers';
+import {
+  Warehouse, Package, Users, ClipboardList,
+  ArrowDownLeft, ArrowUpRight, ShoppingCart, TrendingUp
+} from 'lucide-react';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+
+const StatCard = ({ icon: Icon, label, value, color, onClick }) => (
+  <div
+    onClick={onClick}
+    className={`card p-5 ${onClick ? 'cursor-pointer hover:shadow-md transition-shadow' : ''}`}
+  >
+    <div className="flex items-center justify-between">
+      <div>
+        <div className="text-sm text-gray-500 font-medium">{label}</div>
+        <div className={`text-2xl font-bold mt-1 ${color}`}>{value}</div>
+      </div>
+      <div className={`w-12 h-12 rounded-xl flex items-center justify-center ${color.replace('text-', 'bg-')}/10`}>
+        <Icon className={`w-6 h-6 ${color}`} />
+      </div>
+    </div>
+  </div>
+);
+
+export default function DashboardPage() {
+  const { hasRole } = useAuth();
+  const [stats, setStats] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    reportApi.getDashboard()
+      .then(res => setStats(res.data))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center h-64">
+        <div className="text-gray-500">Äang táº£i dá»¯ liá»‡u...</div>
+      </div>
+    );
+  }
+
+  const role = stats; // placeholder for role-based data
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="page-header">Tá»•ng quan há»‡ thá»‘ng</h1>
+        <p className="text-sm text-gray-500 mt-1">ChÃ o má»«ng báº¡n quay trá»Ÿ láº¡i!</p>
+      </div>
+
+      {/* Stat Cards */}
+      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+        {hasRole('ADMIN', 'MANAGER') && (
+          <StatCard icon={Warehouse} label="Sá»‘ Kho" value={stats?.total_warehouses || 0} color="text-blue-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER', 'KHO') && (
+          <StatCard icon={ClipboardList} label="Tá»•ng Tá»“n kho" value={stats?.total_inventory || 0} color="text-green-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER', 'SALES') && (
+          <StatCard icon={ShoppingCart} label="Chá» duyá»‡t Ä‘Æ¡n" value={stats?.pending_sales || 0} color="text-purple-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER') && (
+          <StatCard icon={Package} label="Sáº£n pháº©m" value={stats?.total_products || 0} color="text-orange-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER', 'KHO') && (
+          <StatCard icon={ArrowDownLeft} label="Phiáº¿u Nháº­p chá»" value={stats?.pending_inbound || 0} color="text-teal-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER', 'KHO') && (
+          <StatCard icon={ArrowUpRight} label="Phiáº¿u Xuáº¥t chá»" value={stats?.pending_outbound || 0} color="text-red-600" />
+        )}
+        {hasRole('ADMIN', 'MANAGER', 'SALES') && (
+          <StatCard icon={Users} label="KhÃ¡ch hÃ ng" value={stats?.total_customers || 0} color="text-indigo-600" />
+        )}
+      </div>
+
+      {/* Pending Approvals */}
+      {(stats?.pending_sales > 0 || stats?.pending_inbound > 0 || stats?.pending_outbound > 0) && hasRole('ADMIN', 'MANAGER') && (
+        <div className="card">
+          <div className="px-5 py-4 border-b border-gray-100">
+            <h3 className="font-semibold text-gray-900 flex items-center gap-2">
+              <TrendingUp className="w-4 h-4 text-amber-500" />
+              CÃ´ng viá»‡c cáº§n xá»­ lÃ½
+            </h3>
+          </div>
+          <div className="p-5 space-y-3">
+            {stats.pending_inbound > 0 && (
+              <div className="flex items-center justify-between p-3 bg-teal-50 rounded-lg">
+                <span className="text-sm text-teal-800">Phiáº¿u nháº­p kho chá» duyá»‡t</span>
+                <span className="badge-warning">{stats.pending_inbound} phiáº¿u</span>
+              </div>
+            )}
+            {stats.pending_outbound > 0 && (
+              <div className="flex items-center justify-between p-3 bg-red-50 rounded-lg">
+                <span className="text-sm text-red-800">Phiáº¿u xuáº¥t kho chá» duyá»‡t</span>
+                <span className="badge-warning">{stats.pending_outbound} phiáº¿u</span>
+              </div>
+            )}
+            {stats.pending_sales > 0 && (
+              <div className="flex items-center justify-between p-3 bg-purple-50 rounded-lg">
+                <span className="text-sm text-purple-800">ÄÆ¡n hÃ ng bÃ¡n chá» duyá»‡t</span>
+                <span className="badge-warning">{stats.pending_sales} Ä‘Æ¡n</span>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+</file>
+<file name="InboundPage.jsx">
+import { useState, useEffect } from 'react';
+import { inboundApi, productApi } from '../api';
+import { useWarehouse } from '../contexts/WarehouseContext';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, ArrowDownLeft, CheckCircle, XCircle } from 'lucide-react';
+import { formatDateTime, getStatusBadge } from '../utils/helpers';
+
+export default function InboundPage() {
+  const { hasRole } = useAuth();
+  const { selectedWarehouseId } = useWarehouse();
+  const [data, setData] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const fetchData = () => {
+    setLoading(true);
+    const params = {};
+    if (selectedWarehouseId) params.warehouse_id = selectedWarehouseId;
+    if (statusFilter) params.status = statusFilter;
+    inboundApi.getAll(params)
+      .then(r => setData(r.data))
+      .catch(() => toast.error('Lá»—i táº£i phiáº¿u nháº­p'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, [selectedWarehouseId, statusFilter]);
+
+  useEffect(() => {
+    productApi.getAll({}).then(r => setProducts(r.data)).catch(() => {});
+  }, []);
+
+  const handleApprove = async (row) => {
+    if (!confirm(`Duyá»‡t phiáº¿u ${row.inbound_code}?`)) return;
+    try {
+      await inboundApi.approve(row.id);
+      toast.success('Duyá»‡t phiáº¿u thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Duyá»‡t tháº¥t báº¡i.');
+    }
+  };
+
+  const handleReject = async (row) => {
+    if (!confirm(`Tá»« chá»‘i phiáº¿u ${row.inbound_code}?`)) return;
+    try {
+      await inboundApi.reject(row.id);
+      toast.info('ÄÃ£ tá»« chá»‘i phiáº¿u.');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Tháº¥t báº¡i.');
+    }
+  };
+
+  const columns = [
+    { key: 'inbound_code', title: 'MÃ£ phiáº¿u', render: v => <code className="text-xs bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded font-mono">{v}</code> },
+    { key: 'warehouse_name', title: 'Kho' },
+    { key: 'created_by_name', title: 'NgÆ°á»i táº¡o' },
+    { key: 'created_at', title: 'NgÃ y táº¡o', render: v => formatDateTime(v) },
+    { key: 'status', title: 'Tráº¡ng thÃ¡i', render: v => { const b = getStatusBadge(v); return <span className={b.className}>{b.label}</span>; } },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '160px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          {row.status === 'PENDING' && hasRole('ADMIN', 'MANAGER') && (
+            <>
+              <button onClick={e => { e.stopPropagation(); handleApprove(row); }} className="p-1.5 hover:bg-green-50 rounded text-green-600" title="Duyá»‡t"><CheckCircle className="w-4 h-4" /></button>
+              <button onClick={e => { e.stopPropagation(); handleReject(row); }} className="p-1.5 hover:bg-red-50 rounded text-red-600" title="Tá»« chá»‘i"><XCircle className="w-4 h-4" /></button>
+            </>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">Phiáº¿u Nháº­p kho</h1>
+          <p className="text-sm text-gray-500 mt-1">Quáº£n lÃ½ phiáº¿u nháº­p hÃ ng vÃ o kho</p>
+        </div>
+        {hasRole('ADMIN', 'KHO') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Táº¡o phiáº¿u nháº­p
+          </button>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <select className="select-field max-w-xs" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <option value="">Táº¥t cáº£ tráº¡ng thÃ¡i</option>
+          <option value="PENDING">Chá» duyá»‡t</option>
+          <option value="APPROVED">ÄÃ£ duyá»‡t</option>
+          <option value="REJECTED">Tá»« chá»‘i</option>
+        </select>
+      </div>
+
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ phiáº¿u nháº­p nÃ o." />
+
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title="Táº¡o phiáº¿u nháº­p kho" size="lg">
+        <InboundForm
+          products={products}
+          selectedWarehouseId={selectedWarehouseId}
+          onSave={() => { setModal({ open: false }); fetchData(); }}
+          onCancel={() => setModal({ open: false })}
+        />
+      </Modal>
+    </div>
+  );
+}
+
+function InboundForm({ products, selectedWarehouseId, onSave, onCancel }) {
+  const [items, setItems] = useState([{ product_id: '', requested_quantity: 1 }]);
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addItem = () => setItems([...items, { product_id: '', requested_quantity: 1 }]);
+  const removeItem = (i) => setItems(items.filter((_, idx) => idx !== i));
+  const updateItem = (i, field, val) => {
+    const updated = [...items];
+    updated[i] = { ...updated[i], [field]: val };
+    setItems(updated);
+  };
+
+  const handleSubmit = async () => {
+    if (!selectedWarehouseId) return toast.error('Vui lÃ²ng chá»n kho tá»« header.');
+    const validItems = items.filter(i => i.product_id && i.requested_quantity > 0);
+    if (validItems.length === 0) return toast.error('Cáº§n Ã­t nháº¥t 1 sáº£n pháº©m.');
+
+    setSaving(true);
+    try {
+      await inboundApi.create({ warehouse_id: selectedWarehouseId, notes, items: validItems });
+      toast.success('Táº¡o phiáº¿u nháº­p thÃ nh cÃ´ng!');
+      onSave();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Táº¡o tháº¥t báº¡i.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="p-3 bg-blue-50 rounded-lg text-sm text-blue-800">
+        Äang nháº­p cho kho: <strong>{selectedWarehouseId || 'ChÆ°a chá»n'}</strong>. Sau khi duyá»‡t, há»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng gá»£i Ã½ ká»‡ trá»‘ng.
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="label-field text-xs">Sáº£n pháº©m {i + 1}</label>
+              <select className="select-field" value={item.product_id} onChange={e => updateItem(i, 'product_id', e.target.value)}>
+                <option value="">-- Chá»n sáº£n pháº©m --</option>
+                {products.map(p => <option key={p.id} value={p.id}>{p.sku} - {p.name}</option>)}
+              </select>
+            </div>
+            <div className="w-28">
+              <label className="label-field text-xs">Sá»‘ lÆ°á»£ng</label>
+              <input type="number" className="input-field" value={item.requested_quantity} onChange={e => updateItem(i, 'requested_quantity', parseInt(e.target.value, 10) || 1)} min="1" />
+            </div>
+            {items.length > 1 && (
+              <button onClick={() => removeItem(i)} className="p-2 text-red-500 hover:bg-red-50 rounded"><XCircle className="w-4 h-4" /></button>
+            )}
+          </div>
+        ))}
+      </div>
+      <button onClick={addItem} className="text-sm text-blue-600 hover:text-blue-800">+ ThÃªm sáº£n pháº©m</button>
+      <div>
+        <label className="label-field">Ghi chÃº</label>
+        <textarea className="input-field" rows="2" value={notes} onChange={e => setNotes(e.target.value)} />
+      </div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={handleSubmit} disabled={saving} className="btn-primary">{saving ? 'Äang lÆ°u...' : 'Táº¡o phiáº¿u'}</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="InventoryPage.jsx">
+import { useState, useEffect } from 'react';
+import { inventoryApi } from '../api';
+import { useWarehouse } from '../contexts/WarehouseContext';
+import DataTable from '../components/DataTable';
+import { toast } from 'sonner';
+import { formatCurrency } from '../utils/helpers';
+
+export default function InventoryPage() {
+  const { selectedWarehouseId, warehouses } = useWarehouse();
+  const [pivotData, setPivotData] = useState({ columns: [], rows: [], warehouses: [] });
+  const [loading, setLoading] = useState(true);
+  const [viewMode, setViewMode] = useState('pivot');
+
+  useEffect(() => {
+    setLoading(true);
+    inventoryApi.getPivot()
+      .then(r => setPivotData(r.data))
+      .catch(() => toast.error('Lá»—i táº£i tá»“n kho'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  const warehouse = warehouses.find(w => w.id === selectedWarehouseId);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><div className="text-gray-500">Äang táº£i dá»¯ liá»‡u...</div></div>;
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="page-header">BÃ¡o cÃ¡o Tá»“n kho Äa Kho</h1>
+        <p className="text-sm text-gray-500 mt-1">Tá»•ng há»£p sá»‘ lÆ°á»£ng hÃ ng tá»“n theo tá»«ng chi nhÃ¡nh</p>
+      </div>
+
+      {/* Warehouse capacity cards */}
+      <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+        {warehouses.map(w => {
+          const pct = w.capacity_percent || 0;
+          const color = pct > 80 ? 'bg-red-500' : pct > 50 ? 'bg-amber-500' : 'bg-green-500';
+          return (
+            <div key={w.id} className="card p-4">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-sm font-medium text-gray-700">{w.name}</span>
+                <span className="text-sm text-gray-500">{w.bins_used}/{w.bins_total} ká»‡</span>
+              </div>
+              <div className="w-full h-3 bg-gray-200 rounded-full overflow-hidden">
+                <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+              </div>
+              <div className="text-right text-xs text-gray-500 mt-1">{pct}% sá»­ dá»¥ng</div>
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Pivot Table */}
+      <div className="card overflow-hidden">
+        <div className="px-5 py-4 border-b border-gray-200 flex items-center justify-between">
+          <h3 className="font-semibold text-gray-900">Báº£ng tá»“n kho theo sáº£n pháº©m</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="table-header">
+                <th className="px-4 py-3 text-left">SKU</th>
+                <th className="px-4 py-3 text-left">TÃªn sáº£n pháº©m</th>
+                {pivotData.warehouses.map((w, i) => (
+                  <th key={i} className="px-4 py-3 text-right">{w}</th>
+                ))}
+                <th className="px-4 py-3 text-right font-semibold">Tá»•ng</th>
+              </tr>
+            </thead>
+            <tbody>
+              {pivotData.rows.length === 0 ? (
+                <tr><td colSpan={pivotData.warehouses.length + 3} className="px-4 py-8 text-center text-gray-400">KhÃ´ng cÃ³ dá»¯ liá»‡u</td></tr>
+              ) : pivotData.rows.map(row => {
+                const total = pivotData.rows.find(r => r.id === row.id)?.total || 0;
+                return (
+                  <tr key={row.id} className="table-row">
+                    <td className="px-4 py-3"><code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded font-mono">{row.sku}</code></td>
+                    <td className="px-4 py-3 font-medium text-gray-900">{row.name}</td>
+                    {pivotData.warehouses.map((_, i) => {
+                      const whId = pivotData.columns.find(c => c.startsWith('warehouse_'))?.replace('warehouse_', '');
+                      const val = row[`warehouse_${i + 1}`] || 0;
+                      return <td key={i} className="px-4 py-3 text-right text-blue-600 font-medium">{parseInt(val, 10).toLocaleString()}</td>;
+                    })}
+                    <td className="px-4 py-3 text-right font-bold text-gray-900">{total.toLocaleString()}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="LoginPage.jsx">
+import { useState } from 'react';
+import { useNavigate } from 'react-router-dom';
+import { useAuth } from '../contexts/AuthContext';
+import { toast } from 'sonner';
+import { Warehouse, Eye, EyeOff } from 'lucide-react';
+
+export default function LoginPage() {
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [loading, setLoading] = useState(false);
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!username.trim() || !password.trim()) {
+      toast.error('Vui lÃ²ng nháº­p tÃªn Ä‘Äƒng nháº­p vÃ  máº­t kháº©u.');
+      return;
+    }
+    setLoading(true);
+    try {
+      await login(username.trim(), password);
+      toast.success('ÄÄƒng nháº­p thÃ nh cÃ´ng!');
+      navigate('/dashboard');
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'ÄÄƒng nháº­p tháº¥t báº¡i.');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-gradient-to-br from-blue-50 to-indigo-100 p-4">
+      <div className="w-full max-w-md">
+        <div className="text-center mb-8">
+          <div className="inline-flex items-center justify-center w-16 h-16 bg-blue-600 rounded-2xl mb-4 shadow-lg">
+            <Warehouse className="w-8 h-8 text-white" />
+          </div>
+          <h1 className="text-2xl font-bold text-gray-900">WMS Há»‡ thá»‘ng Kho</h1>
+          <p className="text-gray-500 mt-1 text-sm">Quáº£n lÃ½ kho Ä‘a chi nhÃ¡nh</p>
+        </div>
+
+        <div className="card p-8">
+          <h2 className="text-lg font-semibold text-gray-900 mb-6">ÄÄƒng nháº­p</h2>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div>
+              <label className="label-field">TÃªn Ä‘Äƒng nháº­p</label>
+              <input
+                type="text"
+                className="input-field"
+                placeholder="Nháº­p tÃªn Ä‘Äƒng nháº­p"
+                value={username}
+                onChange={e => setUsername(e.target.value)}
+                autoComplete="username"
+              />
+            </div>
+
+            <div>
+              <label className="label-field">Máº­t kháº©u</label>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  className="input-field pr-10"
+                  placeholder="Nháº­p máº­t kháº©u"
+                  value={password}
+                  onChange={e => setPassword(e.target.value)}
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+                >
+                  {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="btn-primary w-full flex items-center justify-center gap-2"
+            >
+              {loading ? (
+                <>
+                  <svg className="animate-spin w-4 h-4" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Äang xá»­ lÃ½...
+                </>
+              ) : 'ÄÄƒng nháº­p'}
+            </button>
+          </form>
+
+          <div className="mt-6 p-4 bg-gray-50 rounded-lg text-xs text-gray-600 space-y-1">
+            <div className="font-medium text-gray-700 mb-2">TÃ i khoáº£n demo (máº­t kháº©u: 123456):</div>
+            <div>Admin: <code className="bg-gray-200 px-1 rounded">admin</code></div>
+            <div>Manager: <code className="bg-gray-200 px-1 rounded">manager</code></div>
+            <div>Kho: <code className="bg-gray-200 px-1 rounded">kho</code></div>
+            <div>Sales: <code className="bg-gray-200 px-1 rounded">sales</code></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="OutboundPage.jsx">
+import { useState, useEffect } from 'react';
+import { outboundApi, productApi } from '../api';
+import { useWarehouse } from '../contexts/WarehouseContext';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, ArrowUpRight, CheckCircle, XCircle, PackageCheck } from 'lucide-react';
+import { formatDateTime, getStatusBadge } from '../utils/helpers';
+
+export default function OutboundPage() {
+  const { hasRole } = useAuth();
+  const { selectedWarehouseId } = useWarehouse();
+  const [data, setData] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const fetchData = () => {
+    setLoading(true);
+    const params = {};
+    if (selectedWarehouseId) params.warehouse_id = selectedWarehouseId;
+    if (statusFilter) params.status = statusFilter;
+    outboundApi.getAll(params)
+      .then(r => setData(r.data))
+      .catch(() => toast.error('Lá»—i táº£i phiáº¿u xuáº¥t'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, [selectedWarehouseId, statusFilter]);
+  useEffect(() => { productApi.getAll({}).then(r => setProducts(r.data)).catch(() => {}); }, []);
+
+  const handleApprove = async (row) => {
+    try {
+      await outboundApi.approve(row.id);
+      toast.success('Duyá»‡t phiáº¿u thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) { toast.error(err.response?.data?.message || 'Duyá»‡t tháº¥t báº¡i.'); }
+  };
+
+  const handleComplete = async (row) => {
+    if (!confirm(`HoÃ n táº¥t xuáº¥t kho ${row.outbound_code}?\nHá»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng rÃºt hÃ ng theo FIFO.'`)) return;
+    try {
+      await outboundApi.complete(row.id);
+      toast.success('HoÃ n táº¥t xuáº¥t kho! HÃ ng Ä‘Ã£ Ä‘Æ°á»£c rÃºt theo FIFO.');
+      fetchData();
+    } catch (err) { toast.error(err.response?.data?.message || 'Tháº¥t báº¡i.'); }
+  };
+
+  const handleReject = async (row) => {
+    if (!confirm(`Tá»« chá»‘i phiáº¿u ${row.outbound_code}?`)) return;
+    try {
+      await outboundApi.reject(row.id);
+      toast.info('ÄÃ£ tá»« chá»‘i phiáº¿u.');
+      fetchData();
+    } catch (err) { toast.error(err.response?.data?.message || 'Tháº¥t báº¡i.'); }
+  };
+
+  const columns = [
+    { key: 'outbound_code', title: 'MÃ£ phiáº¿u', render: v => <code className="text-xs bg-red-50 text-red-700 px-1.5 py-0.5 rounded font-mono">{v}</code> },
+    { key: 'warehouse_name', title: 'Kho' },
+    { key: 'created_by_name', title: 'NgÆ°á»i táº¡o' },
+    { key: 'created_at', title: 'NgÃ y táº¡o', render: v => formatDateTime(v) },
+    { key: 'status', title: 'Tráº¡ng thÃ¡i', render: v => { const b = getStatusBadge(v); return <span className={b.className}>{b.label}</span>; } },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '200px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          {row.status === 'PENDING' && hasRole('ADMIN', 'MANAGER') && (
+            <>
+              <button onClick={e => { e.stopPropagation(); handleApprove(row); }} className="p-1.5 hover:bg-green-50 rounded text-green-600" title="Duyá»‡t"><CheckCircle className="w-4 h-4" /></button>
+              <button onClick={e => { e.stopPropagation(); handleReject(row); }} className="p-1.5 hover:bg-red-50 rounded text-red-600" title="Tá»« chá»‘i"><XCircle className="w-4 h-4" /></button>
+            </>
+          )}
+          {row.status === 'APPROVED' && hasRole('ADMIN', 'MANAGER', 'KHO') && (
+            <button onClick={e => { e.stopPropagation(); handleComplete(row); }} className="p-1.5 hover:bg-blue-50 rounded text-blue-600" title="HoÃ n táº¥t xuáº¥t (FIFO)"><PackageCheck className="w-4 h-4" /></button>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">Phiáº¿u Xuáº¥t kho</h1>
+          <p className="text-sm text-gray-500 mt-1">Quáº£n lÃ½ xuáº¥t hÃ ng. Há»‡ thá»‘ng tá»± Ä‘á»™ng Ã¡p dá»¥ng FIFO</p>
+        </div>
+        {hasRole('ADMIN', 'KHO') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Táº¡o phiáº¿u xuáº¥t
+          </button>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <select className="select-field max-w-xs" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <option value="">Táº¥t cáº£ tráº¡ng thÃ¡i</option>
+          <option value="PENDING">Chá» duyá»‡t</option>
+          <option value="APPROVED">ÄÃ£ duyá»‡t</option>
+          <option value="COMPLETED">HoÃ n táº¥t</option>
+          <option value="REJECTED">Tá»« chá»‘i</option>
+        </select>
+      </div>
+
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ phiáº¿u xuáº¥t nÃ o." />
+
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title="Táº¡o phiáº¿u xuáº¥t kho" size="lg">
+        <OutboundForm
+          products={products}
+          selectedWarehouseId={selectedWarehouseId}
+          onSave={() => { setModal({ open: false }); fetchData(); }}
+          onCancel={() => setModal({ open: false })}
+        />
+      </Modal>
+    </div>
+  );
+}
+
+function OutboundForm({ products, selectedWarehouseId, onSave, onCancel }) {
+  const [items, setItems] = useState([{ product_id: '', requested_quantity: 1 }]);
+  const [notes, setNotes] = useState('');
+  const [saving, setSaving] = useState(false);
+
+  const addItem = () => setItems([...items, { product_id: '', requested_quantity: 1 }]);
+  const removeItem = (i) => setItems(items.filter((_, idx) => idx !== i));
+  const updateItem = (i, field, val) => {
+    const updated = [...items];
+    updated[i] = { ...updated[i], [field]: val };
+    setItems(updated);
+  };
+
+  const handleSubmit = async () => {
+    if (!selectedWarehouseId) return toast.error('Vui lÃ²ng chá»n kho tá»« header.');
+    const validItems = items.filter(i => i.product_id && i.requested_quantity > 0);
+    if (validItems.length === 0) return toast.error('Cáº§n Ã­t nháº¥t 1 sáº£n pháº©m.');
+    setSaving(true);
+    try {
+      await outboundApi.create({ warehouse_id: selectedWarehouseId, notes, items: validItems });
+      toast.success('Táº¡o phiáº¿u xuáº¥t thÃ nh cÃ´ng!');
+      onSave();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Táº¡o tháº¥t báº¡i.');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="p-3 bg-red-50 rounded-lg text-sm text-red-800">
+        Xuáº¥t tá»« kho: <strong>{selectedWarehouseId || 'ChÆ°a chá»n'}</strong>. Há»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng chá»n hÃ ng theo thá»© tá»± FIFO (nháº­p trÆ°á»›c xuáº¥t trÆ°á»›c).
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="label-field text-xs">Sáº£n pháº©m {i + 1}</label>
+              <select className="select-field" value={item.product_id} onChange={e => updateItem(i, 'product_id', e.target.value)}>
+                <option value="">-- Chá»n sáº£n pháº©m --</option>
+                {products.map(p => <option key={p.id} value={p.id}>{p.sku} - {p.name}</option>)}
+              </select>
+            </div>
+            <div className="w-28">
+              <label className="label-field text-xs">Sá»‘ lÆ°á»£ng</label>
+              <input type="number" className="input-field" value={item.requested_quantity} onChange={e => updateItem(i, 'requested_quantity', parseInt(e.target.value, 10) || 1)} min="1" />
+            </div>
+            {items.length > 1 && <button onClick={() => removeItem(i)} className="p-2 text-red-500 hover:bg-red-50 rounded"><XCircle className="w-4 h-4" /></button>}
+          </div>
+        ))}
+      </div>
+      <button onClick={addItem} className="text-sm text-blue-600 hover:text-blue-800">+ ThÃªm sáº£n pháº©m</button>
+      <div><label className="label-field">Ghi chÃº</label><textarea className="input-field" rows="2" value={notes} onChange={e => setNotes(e.target.value)} /></div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={handleSubmit} disabled={saving} className="btn-primary">{saving ? 'Äang lÆ°u...' : 'Táº¡o phiáº¿u'}</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="ProductsPage.jsx">
+import { useState, useEffect } from 'react';
+import { productApi, categoryApi } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, Package, Edit, Trash2 } from 'lucide-react';
+import { formatCurrency } from '../utils/helpers';
+
+export default function ProductsPage() {
+  const { hasRole } = useAuth();
+  const [data, setData] = useState([]);
+  const [categories, setCategories] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [search, setSearch] = useState('');
+  const [filterCat, setFilterCat] = useState('');
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+
+  const fetchData = () => {
+    setLoading(true);
+    productApi.getAll({ search, category_id: filterCat })
+      .then(r => setData(r.data))
+      .catch(() => toast.error('Lá»—i táº£i sáº£n pháº©m'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, [search, filterCat]);
+
+  useEffect(() => {
+    categoryApi.getAll().then(r => setCategories(r.data)).catch(() => {});
+  }, []);
+
+  const handleSave = async (formData) => {
+    try {
+      if (modal.mode === 'create') {
+        await productApi.create(formData);
+        toast.success('Táº¡o sáº£n pháº©m thÃ nh cÃ´ng!');
+      } else {
+        await productApi.update(modal.data.id, formData);
+        toast.success('Cáº­p nháº­t thÃ nh cÃ´ng!');
+      }
+      setModal({ open: false, mode: 'create', data: null });
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Lá»—i khi lÆ°u.');
+    }
+  };
+
+  const handleDelete = async (row) => {
+    if (!confirm(`XÃ³a sáº£n pháº©m "${row.name}"?`)) return;
+    try {
+      await productApi.delete(row.id);
+      toast.success('XÃ³a thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'XÃ³a tháº¥t báº¡i.');
+    }
+  };
+
+  const columns = [
+    { key: 'sku', title: 'MÃ£ SKU', render: v => <code className="text-xs bg-gray-100 px-1.5 py-0.5 rounded font-mono">{v}</code> },
+    { key: 'name', title: 'TÃªn sáº£n pháº©m', render: v => <span className="font-medium text-gray-900">{v}</span> },
+    { key: 'category_name', title: 'Danh má»¥c', render: v => v || <span className="text-gray-400">-</span> },
+    { key: 'unit', title: 'ÄÆ¡n vá»‹' },
+    { key: 'price', title: 'GiÃ¡ bÃ¡n', render: v => <span className="text-green-600 font-medium">{formatCurrency(parseFloat(v))}</span> },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '100px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          {hasRole('ADMIN') && (
+            <>
+              <button onClick={e => { e.stopPropagation(); setModal({ open: true, mode: 'edit', data: row }); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-blue-600"><Edit className="w-4 h-4" /></button>
+              <button onClick={e => { e.stopPropagation(); handleDelete(row); }} className="p-1.5 hover:bg-gray-100 rounded text-gray-500 hover:text-red-600"><Trash2 className="w-4 h-4" /></button>
+            </>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">Sáº£n pháº©m</h1>
+          <p className="text-sm text-gray-500 mt-1">Danh sÃ¡ch hÃ ng hÃ³a trong há»‡ thá»‘ng</p>
+        </div>
+        {hasRole('ADMIN') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> ThÃªm sáº£n pháº©m
+          </button>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <input className="input-field max-w-xs" placeholder="TÃ¬m kiáº¿m tÃªn, SKU..." value={search} onChange={e => setSearch(e.target.value)} />
+        <select className="select-field max-w-xs" value={filterCat} onChange={e => setFilterCat(e.target.value)}>
+          <option value="">Táº¥t cáº£ danh má»¥c</option>
+          {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+        </select>
+      </div>
+
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ sáº£n pháº©m nÃ o." />
+
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title={modal.mode === 'create' ? 'ThÃªm sáº£n pháº©m' : 'Sá»­a sáº£n pháº©m'} size="md">
+        <ProductForm categories={categories} initialData={modal.data} onSave={handleSave} onCancel={() => setModal({ open: false })} />
+      </Modal>
+    </div>
+  );
+}
+
+function ProductForm({ categories, initialData, onSave, onCancel }) {
+  const [form, setForm] = useState({
+    name: initialData?.name || '',
+    category_id: initialData?.category_id || '',
+    unit: initialData?.unit || 'CÃ¡i',
+    price: initialData?.price || '',
+    image_url: initialData?.image_url || '',
+  });
+
+  const handleSubmit = () => {
+    if (!form.name.trim()) return toast.error('TÃªn sáº£n pháº©m lÃ  báº¯t buá»™c.');
+    const payload = { ...form, category_id: form.category_id || null, price: parseFloat(form.price) || 0 };
+    onSave(payload);
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="label-field">TÃªn sáº£n pháº©m *</label>
+        <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="VD: Gáº¡o ST25 5kg" />
+      </div>
+      <div className="grid grid-cols-2 gap-4">
+        <div>
+          <label className="label-field">Danh má»¥c</label>
+          <select className="select-field" value={form.category_id} onChange={e => setForm({ ...form, category_id: e.target.value })}>
+            <option value="">-- Chá»n danh má»¥c --</option>
+            {categories.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+        <div>
+          <label className="label-field">ÄÆ¡n vá»‹</label>
+          <input className="input-field" value={form.unit} onChange={e => setForm({ ...form, unit: e.target.value })} placeholder="CÃ¡i, Bá»™, Chai..." />
+        </div>
+      </div>
+      <div>
+        <label className="label-field">GiÃ¡ bÃ¡n (VND) *</label>
+        <input type="number" className="input-field" value={form.price} onChange={e => setForm({ ...form, price: e.target.value })} min="0" placeholder="0" />
+      </div>
+      <div>
+        <label className="label-field">URL HÃ¬nh áº£nh</label>
+        <input className="input-field" value={form.image_url} onChange={e => setForm({ ...form, image_url: e.target.value })} placeholder="https://..." />
+      </div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={handleSubmit} className="btn-primary">LÆ°u</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="ReportsPage.jsx">
+import { useState, useEffect } from 'react';
+import { reportApi } from '../api';
+import { toast } from 'sonner';
+import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { formatCurrency } from '../utils/helpers';
+
+export default function ReportsPage() {
+  const [invSummary, setInvSummary] = useState([]);
+  const [inboundSummary, setInboundSummary] = useState([]);
+  const [outboundSummary, setOutboundSummary] = useState([]);
+  const [salesSummary, setSalesSummary] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    Promise.all([
+      reportApi.getInventorySummary(),
+      reportApi.getInboundSummary(),
+      reportApi.getOutboundSummary(),
+      reportApi.getSalesSummary(),
+    ])
+      .then(([inv, inbound, outbound, sales]) => {
+        setInvSummary(inv.data);
+        setInboundSummary(inbound.data);
+        setOutboundSummary(outbound.data);
+        setSalesSummary(sales.data);
+      })
+      .catch(() => toast.error('Lá»—i táº£i bÃ¡o cÃ¡o'))
+      .finally(() => setLoading(false));
+  }, []);
+
+  if (loading) return <div className="flex items-center justify-center h-64"><div className="text-gray-500">Äang táº£i bÃ¡o cÃ¡o...</div></div>;
+
+  return (
+    <div className="space-y-6">
+      <div>
+        <h1 className="page-header">BÃ¡o cÃ¡o Tá»•ng há»£p</h1>
+        <p className="text-sm text-gray-500 mt-1">Thá»‘ng kÃª toÃ n bá»™ hoáº¡t Ä‘á»™ng kho hÃ ng</p>
+      </div>
+
+      {/* Inventory Summary */}
+      <div className="card">
+        <div className="px-5 py-4 border-b border-gray-200">
+          <h3 className="font-semibold text-gray-900">Tá»“n kho theo Kho</h3>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="table-header">
+                <th className="px-4 py-3 text-left">Kho</th>
+                <th className="px-4 py-3 text-right">Tá»•ng ká»‡</th>
+                <th className="px-4 py-3 text-right">Ká»‡ Ä‘Ã£ dÃ¹ng</th>
+                <th className="px-4 py-3 text-right">Sáº£n pháº©m</th>
+                <th className="px-4 py-3 text-right">Tá»•ng tá»“n</th>
+              </tr>
+            </thead>
+            <tbody>
+              {invSummary.map(row => (
+                <tr key={row.warehouse_id} className="table-row">
+                  <td className="px-4 py-3 font-medium">{row.warehouse_name}</td>
+                  <td className="px-4 py-3 text-right">{row.total_bins}</td>
+                  <td className="px-4 py-3 text-right text-blue-600">{row.used_bins}</td>
+                  <td className="px-4 py-3 text-right">{row.unique_products}</td>
+                  <td className="px-4 py-3 text-right font-medium text-green-600">{parseInt(row.total_quantity, 10).toLocaleString()}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+
+      {/* Inbound vs Outbound */}
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+        <div className="card">
+          <div className="px-5 py-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-900">Tá»•ng há»£p Nháº­p kho</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="table-header">
+                  <th className="px-4 py-3 text-left">Kho</th>
+                  <th className="px-4 py-3 text-right">Tá»•ng phiáº¿u</th>
+                  <th className="px-4 py-3 text-right">ÄÃ£ duyá»‡t</th>
+                  <th className="px-4 py-3 text-right">Tá»« chá»‘i</th>
+                </tr>
+              </thead>
+              <tbody>
+                {inboundSummary.map(row => (
+                  <tr key={row.warehouse_name} className="table-row">
+                    <td className="px-4 py-3">{row.warehouse_name}</td>
+                    <td className="px-4 py-3 text-right">{row.total_orders}</td>
+                    <td className="px-4 py-3 text-right text-green-600">{row.approved}</td>
+                    <td className="px-4 py-3 text-right text-red-600">{row.rejected}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+
+        <div className="card">
+          <div className="px-5 py-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-900">Tá»•ng há»£p Xuáº¥t kho</h3>
+          </div>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="table-header">
+                  <th className="px-4 py-3 text-left">Kho</th>
+                  <th className="px-4 py-3 text-right">Tá»•ng phiáº¿u</th>
+                  <th className="px-4 py-3 text-right">HoÃ n táº¥t</th>
+                  <th className="px-4 py-3 text-right">Tá»« chá»‘i</th>
+                </tr>
+              </thead>
+              <tbody>
+                {outboundSummary.map(row => (
+                  <tr key={row.warehouse_name} className="table-row">
+                    <td className="px-4 py-3">{row.warehouse_name}</td>
+                    <td className="px-4 py-3 text-right">{row.total_orders}</td>
+                    <td className="px-4 py-3 text-right text-green-600">{row.completed}</td>
+                    <td className="px-4 py-3 text-right text-red-600">{row.rejected}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+      {/* Sales Chart */}
+      {salesSummary.length > 0 && (
+        <div className="card">
+          <div className="px-5 py-4 border-b border-gray-200">
+            <h3 className="font-semibold text-gray-900">Doanh thu theo thÃ¡ng</h3>
+          </div>
+          <div className="p-5">
+            <ResponsiveContainer width="100%" height={300}>
+              <BarChart data={salesSummary.map(s => ({
+                month: new Date(s.month).toLocaleDateString('vi-VN', { month: 'short', year: 'numeric' }),
+                revenue: parseFloat(s.total_revenue || 0),
+                orders: s.completed,
+              }))}>
+                <CartesianGrid strokeDasharray="3 3" />
+                <XAxis dataKey="month" />
+                <YAxis />
+                <Tooltip formatter={(v, name) => [name === 'revenue' ? formatCurrency(v) : v, name === 'revenue' ? 'Doanh thu' : 'ÄÆ¡n hoÃ n táº¥t']} />
+                <Bar dataKey="revenue" fill="#2563eb" radius={[4, 4, 0, 0]} />
+              </BarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+</file>
+<file name="SalesPage.jsx">
+import { useState, useEffect } from 'react';
+import { salesApi, productApi, customerApi } from '../api';
+import { useWarehouse } from '../contexts/WarehouseContext';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, CheckCircle, XCircle, ShoppingCart } from 'lucide-react';
+import { formatDateTime, formatCurrency, getStatusBadge } from '../utils/helpers';
+
+export default function SalesPage() {
+  const { hasRole } = useAuth();
+  const { selectedWarehouseId } = useWarehouse();
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+  const [statusFilter, setStatusFilter] = useState('');
+
+  const fetchData = () => {
+    setLoading(true);
+    const params = {};
+    if (selectedWarehouseId) params.warehouse_id = selectedWarehouseId;
+    if (statusFilter) params.status = statusFilter;
+    salesApi.getAll(params)
+      .then(r => setData(r.data))
+      .catch(() => toast.error('Lá»—i táº£i Ä‘Æ¡n hÃ ng'))
+      .finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, [selectedWarehouseId, statusFilter]);
+
+  const handleApprove = async (row) => {
+    try {
+      await salesApi.approve(row.id);
+      toast.success('Duyá»‡t Ä‘Æ¡n hÃ ng! Outbound tá»± Ä‘á»™ng Ä‘Æ°á»£c táº¡o.');
+      fetchData();
+    } catch (err) { toast.error(err.response?.data?.message || 'Duyá»‡t tháº¥t báº¡i.'); }
+  };
+
+  const handleReject = async (row) => {
+    if (!confirm(`Tá»« chá»‘i Ä‘Æ¡n hÃ ng ${row.sales_order_code}?`)) return;
+    try {
+      await salesApi.reject(row.id);
+      toast.info('ÄÃ£ tá»« chá»‘i Ä‘Æ¡n hÃ ng.');
+      fetchData();
+    } catch (err) { toast.error(err.response?.data?.message || 'Tháº¥t báº¡i.'); }
+  };
+
+  const columns = [
+    { key: 'sales_order_code', title: 'MÃ£ ÄH', render: v => <code className="text-xs bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded font-mono">{v}</code> },
+    { key: 'customer_name', title: 'KhÃ¡ch hÃ ng' },
+    { key: 'warehouse_name', title: 'Kho xuáº¥t' },
+    { key: 'total_amount', title: 'Tá»•ng tiá»n', render: v => <span className="font-medium text-green-600">{formatCurrency(parseFloat(v || 0))}</span> },
+    { key: 'created_by_name', title: 'NgÆ°á»i táº¡o' },
+    { key: 'created_at', title: 'NgÃ y táº¡o', render: v => formatDateTime(v) },
+    { key: 'status', title: 'Tráº¡ng thÃ¡i', render: v => { const b = getStatusBadge(v); return <span className={b.className}>{b.label}</span>; } },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '100px',
+      render: (_, row) => (
+        <div className="flex gap-1">
+          {row.status === 'PENDING' && hasRole('ADMIN', 'MANAGER') && (
+            <>
+              <button onClick={e => { e.stopPropagation(); handleApprove(row); }} className="p-1.5 hover:bg-green-50 rounded text-green-600" title="Duyá»‡t"><CheckCircle className="w-4 h-4" /></button>
+              <button onClick={e => { e.stopPropagation(); handleReject(row); }} className="p-1.5 hover:bg-red-50 rounded text-red-600" title="Tá»« chá»‘i"><XCircle className="w-4 h-4" /></button>
+            </>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">ÄÆ¡n hÃ ng bÃ¡n</h1>
+          <p className="text-sm text-gray-500 mt-1">Táº¡o vÃ  quáº£n lÃ½ Ä‘Æ¡n hÃ ng. Duyá»‡t Ä‘á»ƒ tá»± Ä‘á»™ng táº¡o phiáº¿u xuáº¥t kho</p>
+        </div>
+        {hasRole('ADMIN', 'SALES') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Táº¡o Ä‘Æ¡n hÃ ng
+          </button>
+        )}
+      </div>
+
+      <div className="flex gap-3">
+        <select className="select-field max-w-xs" value={statusFilter} onChange={e => setStatusFilter(e.target.value)}>
+          <option value="">Táº¥t cáº£ tráº¡ng thÃ¡i</option>
+          <option value="PENDING">Chá» duyá»‡t</option>
+          <option value="APPROVED">ÄÃ£ duyá»‡t</option>
+          <option value="PROCESSING">Äang xá»­ lÃ½</option>
+          <option value="COMPLETED">HoÃ n táº¥t</option>
+          <option value="REJECTED">Tá»« chá»‘i</option>
+        </select>
+      </div>
+
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ Ä‘Æ¡n hÃ ng nÃ o." />
+
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title="Táº¡o Ä‘Æ¡n hÃ ng bÃ¡n" size="lg">
+        <SalesForm
+          selectedWarehouseId={selectedWarehouseId}
+          onSave={() => { setModal({ open: false }); fetchData(); }}
+          onCancel={() => setModal({ open: false })}
+        />
+      </Modal>
+    </div>
+  );
+}
+
+function SalesForm({ selectedWarehouseId, onSave, onCancel }) {
+  const [customerId, setCustomerId] = useState('');
+  const [items, setItems] = useState([{ product_id: '', quantity: 1 }]);
+  const [customers, setCustomers] = useState([]);
+  const [products, setProducts] = useState([]);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    customerApi.getAll({}).then(r => setCustomers(r.data)).catch(() => {});
+    productApi.getAll({}).then(r => setProducts(r.data)).catch(() => {});
+  }, []);
+
+  const addItem = () => setItems([...items, { product_id: '', quantity: 1 }]);
+  const removeItem = (i) => setItems(items.filter((_, idx) => idx !== i));
+  const updateItem = (i, field, val) => {
+    const updated = [...items];
+    updated[i] = { ...updated[i], [field]: val };
+    setItems(updated);
+  };
+
+  const totalAmount = items.reduce((sum, item) => {
+    const p = products.find(pr => pr.id === parseInt(item.product_id, 10));
+    return sum + (p ? parseFloat(p.price) * (item.quantity || 0) : 0);
+  }, 0);
+
+  const handleSubmit = async () => {
+    if (!selectedWarehouseId) return toast.error('Vui lÃ²ng chá»n kho tá»« header.');
+    const validItems = items.filter(i => i.product_id && i.quantity > 0);
+    if (validItems.length === 0) return toast.error('Cáº§n Ã­t nháº¥t 1 sáº£n pháº©m.');
+    setSaving(true);
+    try {
+      await salesApi.create({ warehouse_id: selectedWarehouseId, customer_id: customerId || null, items: validItems });
+      toast.success('Táº¡o Ä‘Æ¡n hÃ ng thÃ nh cÃ´ng!');
+      onSave();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Táº¡o tháº¥t báº¡i.');
+    } finally { setSaving(false); }
+  };
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="label-field">KhÃ¡ch hÃ ng</label>
+        <select className="select-field" value={customerId} onChange={e => setCustomerId(e.target.value)}>
+          <option value="">-- Chá»n khÃ¡ch hÃ ng --</option>
+          {customers.map(c => <option key={c.id} value={c.id}>{c.customer_code} - {c.name}</option>)}
+        </select>
+      </div>
+      <div className="space-y-2">
+        {items.map((item, i) => (
+          <div key={i} className="flex gap-2 items-end">
+            <div className="flex-1">
+              <label className="label-field text-xs">Sáº£n pháº©m {i + 1}</label>
+              <select className="select-field" value={item.product_id} onChange={e => updateItem(i, 'product_id', e.target.value)}>
+                <option value="">-- Chá»n --</option>
+                {products.map(p => <option key={p.id} value={p.id}>{p.sku} - {p.name} ({formatCurrency(parseFloat(p.price))})</option>)}
+              </select>
+            </div>
+            <div className="w-24">
+              <label className="label-field text-xs">SL</label>
+              <input type="number" className="input-field" value={item.quantity} onChange={e => updateItem(i, 'quantity', parseInt(e.target.value, 10) || 1)} min="1" />
+            </div>
+            <div className="w-28 text-right text-sm text-green-600 font-medium pt-2">
+              {products.find(p => p.id === parseInt(item.product_id, 10))
+                ? formatCurrency(parseFloat(products.find(p => p.id === parseInt(item.product_id, 10)).price) * item.quantity)
+                : '-'}
+            </div>
+            {items.length > 1 && <button onClick={() => removeItem(i)} className="p-2 text-red-500 hover:bg-red-50 rounded"><XCircle className="w-4 h-4" /></button>}
+          </div>
+        ))}
+      </div>
+      <button onClick={addItem} className="text-sm text-blue-600 hover:text-blue-800">+ ThÃªm sáº£n pháº©m</button>
+      <div className="p-4 bg-gray-50 rounded-lg flex justify-between items-center">
+        <span className="text-sm text-gray-600">Tá»•ng cá»™ng:</span>
+        <span className="text-xl font-bold text-green-600">{formatCurrency(totalAmount)}</span>
+      </div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={handleSubmit} disabled={saving} className="btn-primary">{saving ? 'Äang lÆ°u...' : 'Táº¡o Ä‘Æ¡n hÃ ng'}</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="UsersPage.jsx">
+import { useState, useEffect } from 'react';
+import { userApi } from '../api';
+import DataTable from '../components/DataTable';
+import { toast } from 'sonner';
+import { Edit, Trash2, UserCheck } from 'lucide-react';
+import { getRoleLabel } from '../utils/helpers';
+
+const ROLE_COLORS = {
+  ADMIN: 'bg-red-100 text-red-800',
+  MANAGER: 'bg-blue-100 text-blue-800',
+  KHO: 'bg-green-100 text-green-800',
+  SALES: 'bg-purple-100 text-purple-800',
+};
+
+export default function UsersPage() {
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  const fetchData = () => {
+    setLoading(true);
+    userApi.getAll().then(r => setData(r.data)).catch(() => toast.error('Lá»—i táº£i ngÆ°á»i dÃ¹ng')).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  const columns = [
+    { key: 'username', title: 'TÃ i khoáº£n', render: v => <span className="font-medium text-gray-900">{v}</span> },
+    { key: 'full_name', title: 'Há» tÃªn' },
+    { key: 'email', title: 'Email' },
+    {
+      key: 'role', title: 'Vai trÃ²',
+      render: v => <span className={`badge ${ROLE_COLORS[v] || 'bg-gray-100 text-gray-800'}`}>{getRoleLabel(v)}</span>
+    },
+    { key: 'is_active', title: 'Tráº¡ng thÃ¡i', render: v => v ? <span className="badge-success">Hoáº¡t Ä‘á»™ng</span> : <span className="badge-danger">Táº¯t</span> },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div>
+        <h1 className="page-header">Quáº£n lÃ½ NgÆ°á»i dÃ¹ng</h1>
+        <p className="text-sm text-gray-500 mt-1">PhÃ¢n quyá»n truy cáº­p há»‡ thá»‘ng (RBAC)</p>
+      </div>
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ ngÆ°á»i dÃ¹ng nÃ o." />
+    </div>
+  );
+}
+
+</file>
+<file name="WarehousesPage.jsx">
+import { useState, useEffect } from 'react';
+import { warehouseApi } from '../api';
+import { useAuth } from '../contexts/AuthContext';
+import DataTable from '../components/DataTable';
+import Modal from '../components/Modal';
+import { toast } from 'sonner';
+import { Plus, Warehouse, Edit, Trash2 } from 'lucide-react';
+
+export default function WarehousesPage() {
+  const { hasRole } = useAuth();
+  const [data, setData] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [modal, setModal] = useState({ open: false, mode: 'create', data: null });
+
+  const fetchData = () => {
+    setLoading(true);
+    warehouseApi.getAll().then(r => setData(r.data)).catch(() => toast.error('Lá»—i táº£i kho')).finally(() => setLoading(false));
+  };
+
+  useEffect(() => { fetchData(); }, []);
+
+  const handleSave = async (formData) => {
+    try {
+      if (modal.mode === 'create') {
+        await warehouseApi.create(formData);
+        toast.success('Táº¡o kho thÃ nh cÃ´ng!');
+      } else {
+        await warehouseApi.update(modal.data.id, formData);
+        toast.success('Cáº­p nháº­t thÃ nh cÃ´ng!');
+      }
+      setModal({ open: false, mode: 'create', data: null });
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'Lá»—i khi lÆ°u.');
+    }
+  };
+
+  const handleDelete = async (row) => {
+    if (!confirm(`XÃ³a kho "${row.name}"?`)) return;
+    try {
+      await warehouseApi.delete(row.id);
+      toast.success('XÃ³a thÃ nh cÃ´ng!');
+      fetchData();
+    } catch (err) {
+      toast.error(err.response?.data?.message || 'XÃ³a tháº¥t báº¡i.');
+    }
+  };
+
+  const columns = [
+    { key: 'name', title: 'TÃªn kho', render: v => <span className="font-medium text-gray-900">{v}</span> },
+    { key: 'address', title: 'Äá»‹a chá»‰' },
+    { key: 'bins_total', title: 'Tá»•ng ká»‡', render: v => <span className="text-gray-600">{v || 0}</span> },
+    { key: 'bins_used', title: 'ÄÃ£ dÃ¹ng', render: v => <span className="text-blue-600 font-medium">{v || 0}</span> },
+    {
+      key: 'capacity_percent', title: 'Sá»©c chá»©a',
+      render: (v) => {
+        const pct = v || 0;
+        const color = pct > 80 ? 'bg-red-500' : pct > 50 ? 'bg-amber-500' : 'bg-green-500';
+        return (
+          <div className="flex items-center gap-2">
+            <div className="w-24 h-2 bg-gray-200 rounded-full overflow-hidden">
+              <div className={`h-full ${color} rounded-full transition-all`} style={{ width: `${pct}%` }} />
+            </div>
+            <span className="text-xs text-gray-600">{pct}%</span>
+          </div>
+        );
+      }
+    },
+    {
+      key: 'actions', title: 'Thao tÃ¡c', width: '120px',
+      render: (_, row) => (
+        <div className="flex items-center gap-1">
+          <button onClick={(e) => { e.stopPropagation(); setModal({ open: true, mode: 'edit', data: row }); }} className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-blue-600">
+            <Edit className="w-4 h-4" />
+          </button>
+          {hasRole('ADMIN') && (
+            <button onClick={(e) => { e.stopPropagation(); handleDelete(row); }} className="p-1.5 hover:bg-gray-100 rounded-lg text-gray-500 hover:text-red-600">
+              <Trash2 className="w-4 h-4" />
+            </button>
+          )}
+        </div>
+      )
+    },
+  ];
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="page-header">Quáº£n lÃ½ Kho</h1>
+          <p className="text-sm text-gray-500 mt-1">Danh sÃ¡ch chi nhÃ¡nh kho hÃ ng</p>
+        </div>
+        {hasRole('ADMIN') && (
+          <button onClick={() => setModal({ open: true, mode: 'create', data: null })} className="btn-primary flex items-center gap-2">
+            <Plus className="w-4 h-4" /> Táº¡o kho má»›i
+          </button>
+        )}
+      </div>
+
+      <DataTable columns={columns} data={data} loading={loading} emptyMessage="ChÆ°a cÃ³ kho nÃ o." />
+
+      <Modal isOpen={modal.open} onClose={() => setModal({ open: false })} title={modal.mode === 'create' ? 'Táº¡o kho má»›i' : 'Sá»­a kho'} size="md">
+        <WarehouseForm initialData={modal.data} onSave={handleSave} onCancel={() => setModal({ open: false })} />
+      </Modal>
+    </div>
+  );
+}
+
+function WarehouseForm({ initialData, onSave, onCancel }) {
+  const [form, setForm] = useState({ name: initialData?.name || '', address: initialData?.address || '', total_capacity: initialData?.total_capacity || 100 });
+  return (
+    <div className="space-y-4">
+      <div>
+        <label className="label-field">TÃªn kho *</label>
+        <input className="input-field" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="VD: Kho Tá»•ng HÃ  Ná»™i" />
+      </div>
+      <div>
+        <label className="label-field">Äá»‹a chá»‰</label>
+        <input className="input-field" value={form.address} onChange={e => setForm({ ...form, address: e.target.value })} placeholder="Äá»‹a chá»‰ kho" />
+      </div>
+      <div>
+        <label className="label-field">Sá»©c chá»©a (sá»‘ ká»‡) *</label>
+        <input type="number" className="input-field" value={form.total_capacity} onChange={e => setForm({ ...form, total_capacity: parseInt(e.target.value, 10) || 0 })} min="0" max="10000" />
+        <p className="text-xs text-gray-500 mt-1">Há»‡ thá»‘ng sáº½ tá»± Ä‘á»™ng sinh mÃ£ ká»‡ (VD: A-A1-R1-S1-B1) theo sá»‘ lÆ°á»£ng nÃ y.</p>
+      </div>
+      <div className="flex justify-end gap-2 pt-4 border-t">
+        <button onClick={onCancel} className="btn-secondary">Há»§y</button>
+        <button onClick={() => onSave(form)} className="btn-primary" disabled={!form.name.trim()}>LÆ°u</button>
+      </div>
+    </div>
+  );
+}
+
+</file>
+<file name="helpers.js">
+import { clsx } from 'clsx';
+import { twMerge } from 'tailwind-merge';
+
+export const cn = (...args) => twMerge(clsx(args));
+
+export const formatCurrency = (amount) => {
+  return new Intl.NumberFormat('vi-VN', { style: 'currency', currency: 'VND' }).format(amount);
+};
+
+export const formatDate = (dateStr) => {
+  if (!dateStr) return '-';
+  return new Date(dateStr).toLocaleDateString('vi-VN', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+  });
+};
+
+export const formatDateTime = (dateStr) => {
+  if (!dateStr) return '-';
+  return new Date(dateStr).toLocaleString('vi-VN', {
+    day: '2-digit', month: '2-digit', year: 'numeric',
+    hour: '2-digit', minute: '2-digit',
+  });
+};
+
+export const getRoleLabel = (role) => {
+  const labels = { ADMIN: 'Quáº£n trá»‹', MANAGER: 'TrÆ°á»Ÿng phÃ²ng', KHO: 'NhÃ¢n viÃªn kho', SALES: 'Kinh doanh' };
+  return labels[role] || role;
+};
+
+export const getStatusBadge = (status) => {
+  const map = {
+    PENDING: { label: 'Chá» duyá»‡t', className: 'badge-warning' },
+    APPROVED: { label: 'ÄÃ£ duyá»‡t', className: 'badge-success' },
+    REJECTED: { label: 'Tá»« chá»‘i', className: 'badge-danger' },
+    COMPLETED: { label: 'HoÃ n táº¥t', className: 'badge-success' },
+    PROCESSING: { label: 'Äang xá»­ lÃ½', className: 'badge-info' },
+  };
+  const config = map[status] || { label: status, className: 'badge-gray' };
+  return config;
+};
+
+</file>
+<file name="App.jsx">
+import { Routes, Route, Navigate } from 'react-router-dom';
+import { useAuth } from './contexts/AuthContext';
+import Layout from './layouts/Layout';
+import LoginPage from './pages/LoginPage';
+import DashboardPage from './pages/DashboardPage';
+import WarehousesPage from './pages/WarehousesPage';
+import ProductsPage from './pages/ProductsPage';
+import CategoriesPage from './pages/CategoriesPage';
+import CustomersPage from './pages/CustomersPage';
+import InventoryPage from './pages/InventoryPage';
+import InboundPage from './pages/InboundPage';
+import OutboundPage from './pages/OutboundPage';
+import SalesPage from './pages/SalesPage';
+import ReportsPage from './pages/ReportsPage';
+import UsersPage from './pages/UsersPage';
+
+const ProtectedRoute = ({ children, roles }) => {
+  const { user, loading } = useAuth();
+  if (loading) return <div className="flex items-center justify-center h-screen"><div className="text-gray-500">Äang táº£i...</div></div>;
+  if (!user) return <Navigate to="/login" replace />;
+  if (roles && !roles.includes(user.role)) return <Navigate to="/dashboard" replace />;
+  return children;
+};
+
+export default function App() {
+  const { user } = useAuth();
+
+  return (
+    <Routes>
+      <Route path="/login" element={user ? <Navigate to="/dashboard" replace /> : <LoginPage />} />
+      <Route path="/" element={<ProtectedRoute><Layout /></ProtectedRoute>}>
+        <Route index element={<Navigate to="/dashboard" replace />} />
+        <Route path="dashboard" element={<DashboardPage />} />
+        <Route path="warehouses" element={<ProtectedRoute roles={['ADMIN', 'MANAGER']}><WarehousesPage /></ProtectedRoute>} />
+        <Route path="products" element={<ProductsPage />} />
+        <Route path="categories" element={<ProtectedRoute roles={['ADMIN']}><CategoriesPage /></ProtectedRoute>} />
+        <Route path="customers" element={<ProtectedRoute roles={['ADMIN', 'MANAGER', 'SALES']}><CustomersPage /></ProtectedRoute>} />
+        <Route path="inventory" element={<ProtectedRoute roles={['ADMIN', 'MANAGER', 'KHO']}><InventoryPage /></ProtectedRoute>} />
+        <Route path="inbound" element={<ProtectedRoute roles={['ADMIN', 'MANAGER', 'KHO']}><InboundPage /></ProtectedRoute>} />
+        <Route path="outbound" element={<ProtectedRoute roles={['ADMIN', 'MANAGER', 'KHO']}><OutboundPage /></ProtectedRoute>} />
+        <Route path="sales" element={<ProtectedRoute roles={['ADMIN', 'MANAGER', 'SALES']}><SalesPage /></ProtectedRoute>} />
+        <Route path="reports" element={<ProtectedRoute roles={['ADMIN', 'MANAGER']}><ReportsPage /></ProtectedRoute>} />
+        <Route path="users" element={<ProtectedRoute roles={['ADMIN']}><UsersPage /></ProtectedRoute>} />
+      </Route>
+      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+    </Routes>
+  );
+}
+
+</file>
+<file name="main.jsx">
+import React from 'react';
+import ReactDOM from 'react-dom/client';
+import { BrowserRouter } from 'react-router-dom';
+import { Toaster } from 'sonner';
+import App from './App';
+import { AuthProvider } from './contexts/AuthContext';
+import { WarehouseProvider } from './contexts/WarehouseContext';
+import './index.css';
+
+ReactDOM.createRoot(document.getElementById('root')).render(
+  <React.StrictMode>
+    <BrowserRouter>
+      <AuthProvider>
+        <WarehouseProvider>
+          <App />
+          <Toaster
+            position="top-right"
+            toastOptions={{
+              style: { fontFamily: 'inherit', fontSize: '14px' },
+            }}
+          />
+        </WarehouseProvider>
+      </AuthProvider>
+    </BrowserRouter>
+  </React.StrictMode>
+);
+
+</file>

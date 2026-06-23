@@ -1,0 +1,2863 @@
+﻿<file name="setupDb.js">
+require('dotenv').config();
+const { Pool } = require('pg');
+const fs = require('fs');
+const path = require('path');
+const bcrypt = require('bcryptjs');
+
+// Parse DATABASE_URL tu Neon
+const databaseUrl = process.env.DATABASE_URL;
+let dbConfig = {};
+
+if (databaseUrl) {
+  try {
+    const url = new URL(databaseUrl);
+    dbConfig = {
+      host: url.hostname,
+      port: parseInt(url.port, 10) || 5432,
+      database: url.pathname.replace('/', ''),
+      user: url.username,
+      password: url.password,
+    };
+  } catch (err) {
+    console.error('[SETUP] Failed to parse DATABASE_URL:', err.message);
+    process.exit(1);
+  }
+} else {
+  dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    database: process.env.DB_NAME || 'wms_db',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+  };
+}
+
+const pool = new Pool({
+  host: dbConfig.host,
+  port: dbConfig.port,
+  database: dbConfig.database,
+  user: dbConfig.user,
+  password: dbConfig.password,
+  ssl: { rejectUnauthorized: false },
+});
+
+async function setupDatabase() {
+  console.log('[SETUP] Connecting to:', dbConfig.host + '/' + dbConfig.database);
+
+  const client = await pool.connect();
+
+  try {
+    // Kiem tra ket noi
+    await client.query('SELECT 1');
+    console.log('[SETUP] Connected successfully!');
+
+    const sql = fs.readFileSync(path.join(__dirname, 'init-db.sql'), 'utf8');
+
+    const statements = sql
+      .split(/;[\r\n]+/)
+      .map(s => s.trim())
+      .filter(s => s.length > 0 && !s.startsWith('--'));
+
+    let success = 0, failed = 0;
+    for (const stmt of statements) {
+      try {
+        await client.query(stmt + ';');
+        success++;
+      } catch (err) {
+        failed++;
+        // Chi log loi nghiep vu, bo qua loi thuong gap (da ton tai, constraint, ...)
+        const code = err.code || '';
+        if (!['23505', '23503', '42P07', '42710'].includes(code)) {
+          console.log(`[WARN] ${err.message.substring(0, 100)}`);
+        }
+      }
+    }
+
+    console.log(`[SETUP] SQL: ${success} success, ${failed} warnings`);
+
+    // Cap nhat password cho user seed
+    const passwordHash = await bcrypt.hash('123456', 10);
+    try {
+      await client.query(
+        `UPDATE users SET password_hash = $1 WHERE username IN ('admin','manager','kho','sales')`,
+        [passwordHash]
+      );
+      console.log('[SETUP] Password updated for demo users (123456)');
+    } catch (err) {
+      console.log('[WARN] Could not update seed passwords:', err.message);
+    }
+
+    console.log('[SETUP] Database setup completed!');
+  } finally {
+    client.release();
+    await pool.end();
+  }
+}
+
+setupDatabase().catch(err => {
+  console.error('[SETUP] Setup failed:', err.message);
+  process.exit(1);
+});
+
+</file>
+<file name="database.js">
+const { Sequelize } = require('sequelize');
+const { Pool } = require('pg');
+require('dotenv').config();
+
+const isProduction = process.env.NODE_ENV === 'production';
+
+// Parse DATABASE_URL (format: postgresql://user:pass@host:port/db?params)
+const databaseUrl = process.env.DATABASE_URL;
+let dbConfig = {};
+
+if (databaseUrl) {
+  try {
+    const url = new URL(databaseUrl);
+    dbConfig = {
+      host: url.hostname,
+      port: parseInt(url.port, 10) || 5432,
+      database: url.pathname.replace('/', ''),
+      user: url.username,
+      password: url.password,
+    };
+  } catch (err) {
+    console.error('[DB] Failed to parse DATABASE_URL:', err.message);
+  }
+} else {
+  // Fallback cho local development
+  dbConfig = {
+    host: process.env.DB_HOST || 'localhost',
+    port: parseInt(process.env.DB_PORT || '5432', 10),
+    database: process.env.DB_NAME || 'wms_db',
+    user: process.env.DB_USER || 'postgres',
+    password: process.env.DB_PASSWORD || '',
+  };
+}
+
+const sequelize = new Sequelize(dbConfig.database, dbConfig.user, dbConfig.password, {
+  host: dbConfig.host,
+  port: dbConfig.port,
+  dialect: 'postgres',
+  logging: isProduction ? false : (msg) => console.log('[DB]', msg),
+  pool: {
+    max: 5,
+    min: 0,
+    acquire: 30000,
+    idle: 10000,
+  },
+  dialectOptions: {
+    ssl: isProduction ? { rejectUnauthorized: false } : false,
+  },
+  timezone: '+07:00',
+});
+
+const rawPool = new Pool({
+  host: dbConfig.host,
+  port: dbConfig.port,
+  database: dbConfig.database,
+  user: dbConfig.user,
+  password: dbConfig.password,
+  ssl: isProduction ? { rejectUnauthorized: false } : false,
+  max: 10,
+});
+
+const query = async (text, params) => {
+  const client = await rawPool.connect();
+  try {
+    const result = await client.query(text, params);
+    return result;
+  } finally {
+    client.release();
+  }
+};
+
+const transaction = async () => {
+  const client = await rawPool.connect();
+  try {
+    await client.query('BEGIN');
+    const t = {
+      query: (...args) => client.query(...args),
+      commit: async () => { await client.query('COMMIT'); client.release(); },
+      rollback: async () => { await client.query('ROLLBACK'); client.release(); },
+    };
+    return t;
+  } catch (err) {
+    client.release();
+    throw err;
+  }
+};
+
+module.exports = { sequelize, query, transaction, rawPool };
+
+</file>
+<file name="index.js">
+require('dotenv').config();
+
+const config = {
+  port: parseInt(process.env.PORT || '3000', 10),
+  jwtSecret: process.env.JWT_SECRET || 'wms-dev-secret-change-in-production',
+  jwtExpiresIn: process.env.JWT_EXPIRES_IN || '7d',
+  nodeEnv: process.env.NODE_ENV || 'development',
+  corsOrigin: process.env.CORS_ORIGIN || 'http://localhost:5173',
+};
+
+module.exports = config;
+
+</file>
+<file name="auth.controller.js">
+const { validationResult } = require('express-validator');
+const authService = require('../services/auth.service');
+
+const login = async (req, res, next) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Dá»¯ liá»‡u khÃ´ng há»£p lá»‡.', errors: errors.array() });
+    }
+
+    const { username, password } = req.body;
+    const result = await authService.login(username, password);
+    res.json(result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+const register = async (req, res, next) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Dá»¯ liá»‡u khÃ´ng há»£p lá»‡.', errors: errors.array() });
+    }
+
+    const user = await authService.register(req.body);
+    res.status(201).json({ message: 'Táº¡o tÃ i khoáº£n thÃ nh cÃ´ng.', user });
+  } catch (err) {
+    next(err);
+  }
+};
+
+const getMe = async (req, res, next) => {
+  try {
+    const user = await authService.getMe(req.user.id);
+    res.json(user);
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { login, register, getMe };
+
+</file>
+<file name="category.controller.js">
+const categoryService = require('../services/category.service');
+
+const getAll = async (req, res, next) => {
+  try {
+    const result = await categoryService.getAll();
+    res.json(result);
+  } catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try {
+    const result = await categoryService.getById(parseInt(req.params.id, 10));
+    res.json(result);
+  } catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await categoryService.create(req.body);
+    res.status(201).json({ message: 'Táº¡o danh má»¥c thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const updateById = async (req, res, next) => {
+  try {
+    const result = await categoryService.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const deleteById = async (req, res, next) => {
+  try {
+    await categoryService.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a danh má»¥c thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="common.controller.js">
+const { validationResult } = require('express-validator');
+
+const validate = (req, res, next) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(400).json({ message: 'Dá»¯ liá»‡u khÃ´ng há»£p lá»‡.', errors: errors.array() });
+  }
+  next();
+};
+
+const createHandler = (service) => async (req, res, next) => {
+  try {
+    validate(req, res, next);
+    const result = await service.create(req.body);
+    res.status(201).json({ message: 'Táº¡o thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+
+const getAllHandler = (service) => async (req, res, next) => {
+  try {
+    const result = await service.getAll(req.query);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+const getByIdHandler = (service) => async (req, res, next) => {
+  try {
+    const result = await service.getById(parseInt(req.params.id, 10));
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+const updateHandler = (service) => async (req, res, next) => {
+  try {
+    const result = await service.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+
+const deleteHandler = (service) => async (req, res, next) => {
+  try {
+    await service.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { validate, createHandler, getAllHandler, getByIdHandler, updateHandler, deleteHandler };
+
+</file>
+<file name="customer.controller.js">
+const customerService = require('../services/customer.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await customerService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try { res.json(await customerService.getById(parseInt(req.params.id, 10))); }
+  catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await customerService.create(req.body);
+    res.status(201).json({ message: 'Táº¡o khÃ¡ch hÃ ng thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const updateById = async (req, res, next) => {
+  try {
+    const result = await customerService.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const deleteById = async (req, res, next) => {
+  try {
+    await customerService.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a khÃ¡ch hÃ ng thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="inbound.controller.js">
+const inboundService = require('../services/inbound.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await inboundService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try { res.json(await inboundService.getById(parseInt(req.params.id, 10))); }
+  catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await inboundService.create(req.body, req.user.id);
+    res.status(201).json({ message: 'Táº¡o phiáº¿u nháº­p thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const approve = async (req, res, next) => {
+  try {
+    const result = await inboundService.approve(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Duyá»‡t phiáº¿u nháº­p thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const reject = async (req, res, next) => {
+  try {
+    const result = await inboundService.reject(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Tá»« chá»‘i phiáº¿u nháº­p.', data: result });
+  } catch (err) { next(err); }
+};
+const suggestBins = async (req, res, next) => {
+  try {
+    const { warehouse_id, product_id, qty } = req.query;
+    const result = await inboundService.suggestBins(warehouse_id, product_id, qty);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, approve, reject, suggestBins };
+
+</file>
+<file name="inventory.controller.js">
+const inventoryService = require('../services/inventory.service');
+
+const getPivotReport = async (req, res, next) => {
+  try {
+    const result = await inventoryService.getPivotReport();
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+const getByWarehouse = async (req, res, next) => {
+  try {
+    const { warehouse_id } = req.query;
+    const result = await inventoryService.getByWarehouse(warehouse_id);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+const getStockByProduct = async (req, res, next) => {
+  try {
+    const result = await inventoryService.getStockByProduct(parseInt(req.params.productId, 10));
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+const traceProduct = async (req, res, next) => {
+  try {
+    const result = await inventoryService.traceProduct(parseInt(req.params.productId, 10));
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getPivotReport, getByWarehouse, getStockByProduct, traceProduct };
+
+</file>
+<file name="location.controller.js">
+const locationService = require('../services/location.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await locationService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+
+const getSuggest = async (req, res, next) => {
+  try {
+    const { warehouse_id, product_id, qty } = req.query;
+    const result = await locationService.getSuggest(warehouse_id, product_id, qty);
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getSuggest };
+
+</file>
+<file name="outbound.controller.js">
+const outboundService = require('../services/outbound.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await outboundService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try { res.json(await outboundService.getById(parseInt(req.params.id, 10))); }
+  catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await outboundService.create(req.body, req.user.id);
+    res.status(201).json({ message: 'Táº¡o phiáº¿u xuáº¥t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const approve = async (req, res, next) => {
+  try {
+    const result = await outboundService.approve(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Duyá»‡t phiáº¿u xuáº¥t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const complete = async (req, res, next) => {
+  try {
+    const result = await outboundService.complete(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'HoÃ n táº¥t xuáº¥t kho thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const reject = async (req, res, next) => {
+  try {
+    const result = await outboundService.reject(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Tá»« chá»‘i phiáº¿u xuáº¥t.', data: result });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, approve, complete, reject };
+
+</file>
+<file name="product.controller.js">
+const productService = require('../services/product.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await productService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try { res.json(await productService.getById(parseInt(req.params.id, 10))); }
+  catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await productService.create(req.body);
+    res.status(201).json({ message: 'Táº¡o sáº£n pháº©m thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const updateById = async (req, res, next) => {
+  try {
+    const result = await productService.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const deleteById = async (req, res, next) => {
+  try {
+    await productService.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a sáº£n pháº©m thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="report.controller.js">
+const reportService = require('../services/report.service');
+
+const getInventorySummary = async (req, res, next) => {
+  try { res.json(await reportService.getInventorySummary()); }
+  catch (err) { next(err); }
+};
+const getInboundSummary = async (req, res, next) => {
+  try { res.json(await reportService.getInboundSummary(req.query)); }
+  catch (err) { next(err); }
+};
+const getOutboundSummary = async (req, res, next) => {
+  try { res.json(await reportService.getOutboundSummary(req.query)); }
+  catch (err) { next(err); }
+};
+const getSalesSummary = async (req, res, next) => {
+  try { res.json(await reportService.getSalesSummary(req.query)); }
+  catch (err) { next(err); }
+};
+const getDashboardStats = async (req, res, next) => {
+  try { res.json(await reportService.getDashboardStats()); }
+  catch (err) { next(err); }
+};
+
+module.exports = {
+  getInventorySummary,
+  getInboundSummary,
+  getOutboundSummary,
+  getSalesSummary,
+  getDashboardStats,
+};
+
+</file>
+<file name="sales.controller.js">
+const salesService = require('../services/sales.service');
+
+const getAll = async (req, res, next) => {
+  try { res.json(await salesService.getAll(req.query)); }
+  catch (err) { next(err); }
+};
+const getById = async (req, res, next) => {
+  try { res.json(await salesService.getById(parseInt(req.params.id, 10))); }
+  catch (err) { next(err); }
+};
+const create = async (req, res, next) => {
+  try {
+    const result = await salesService.create(req.body, req.user.id);
+    res.status(201).json({ message: 'Táº¡o Ä‘Æ¡n hÃ ng thÃ nh cÃ´ng.', data: result });
+  } catch (err) { next(err); }
+};
+const approve = async (req, res, next) => {
+  try {
+    const result = await salesService.approve(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Duyá»‡t Ä‘Æ¡n hÃ ng thÃ nh cÃ´ng. Outbound tá»± Ä‘á»™ng táº¡o.', data: result });
+  } catch (err) { next(err); }
+};
+const reject = async (req, res, next) => {
+  try {
+    const result = await salesService.reject(parseInt(req.params.id, 10), req.user.id);
+    res.json({ message: 'Tá»« chá»‘i Ä‘Æ¡n hÃ ng.', data: result });
+  } catch (err) { next(err); }
+};
+const checkStock = async (req, res, next) => {
+  try {
+    const { items, warehouse_id } = req.query;
+    const result = await salesService.checkStock(JSON.parse(items || '[]'), parseInt(warehouse_id, 10));
+    res.json(result);
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, approve, reject, checkStock };
+
+</file>
+<file name="user.controller.js">
+const userService = require('../services/user.service');
+
+const getAll = async (req, res, next) => {
+  try {
+    const users = await userService.getAll();
+    res.json(users);
+  } catch (err) { next(err); }
+};
+
+const getById = async (req, res, next) => {
+  try {
+    const user = await userService.getById(parseInt(req.params.id, 10));
+    res.json(user);
+  } catch (err) { next(err); }
+};
+
+const updateById = async (req, res, next) => {
+  try {
+    const user = await userService.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', user });
+  } catch (err) { next(err); }
+};
+
+const deleteById = async (req, res, next) => {
+  try {
+    await userService.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a ngÆ°á»i dÃ¹ng thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, updateById, deleteById };
+
+</file>
+<file name="warehouse.controller.js">
+const { validationResult } = require('express-validator');
+const warehouseService = require('../services/warehouse.service');
+
+const getAll = async (req, res, next) => {
+  try {
+    const warehouses = await warehouseService.getAll();
+    res.json(warehouses);
+  } catch (err) { next(err); }
+};
+
+const getById = async (req, res, next) => {
+  try {
+    const warehouse = await warehouseService.getById(parseInt(req.params.id, 10));
+    res.json(warehouse);
+  } catch (err) { next(err); }
+};
+
+const create = async (req, res, next) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ message: 'Dá»¯ liá»‡u khÃ´ng há»£p lá»‡.', errors: errors.array() });
+    }
+    const warehouse = await warehouseService.create(req.body);
+    res.status(201).json({ message: 'Táº¡o kho thÃ nh cÃ´ng.', warehouse });
+  } catch (err) { next(err); }
+};
+
+const updateById = async (req, res, next) => {
+  try {
+    const warehouse = await warehouseService.updateById(parseInt(req.params.id, 10), req.body);
+    res.json({ message: 'Cáº­p nháº­t thÃ nh cÃ´ng.', warehouse });
+  } catch (err) { next(err); }
+};
+
+const deleteById = async (req, res, next) => {
+  try {
+    await warehouseService.deleteById(parseInt(req.params.id, 10));
+    res.json({ message: 'XÃ³a kho thÃ nh cÃ´ng.' });
+  } catch (err) { next(err); }
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="auth.middleware.js">
+const jwt = require('jsonwebtoken');
+const config = require('../config');
+const { User } = require('../models');
+
+const authenticate = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith('Bearer ')) {
+      return res.status(401).json({ message: 'KhÃ´ng cÃ³ token. Vui lÃ²ng Ä‘Äƒng nháº­p.' });
+    }
+
+    const token = authHeader.split(' ')[1];
+    const decoded = jwt.verify(token, config.jwtSecret);
+
+    const user = await User.findByPk(decoded.id, {
+      attributes: { exclude: ['password_hash'] },
+    });
+
+    if (!user) {
+      return res.status(401).json({ message: 'NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i.' });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ message: 'TÃ i khoáº£n Ä‘Ã£ bá»‹ vÃ´ hiá»‡u hÃ³a.' });
+    }
+
+    req.user = user;
+    next();
+  } catch (err) {
+    if (err.name === 'TokenExpiredError') {
+      return res.status(401).json({ message: 'Token Ä‘Ã£ háº¿t háº¡n. Vui lÃ²ng Ä‘Äƒng nháº­p láº¡i.' });
+    }
+    if (err.name === 'JsonWebTokenError') {
+      return res.status(401).json({ message: 'Token khÃ´ng há»£p lá»‡.' });
+    }
+    return res.status(500).json({ message: 'Lá»—i xÃ¡c thá»±c.' });
+  }
+};
+
+const authorize = (...allowedRoles) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ message: 'ChÆ°a xÃ¡c thá»±c.' });
+    }
+
+    if (!allowedRoles.includes(req.user.role)) {
+      return res.status(403).json({
+        message: `KhÃ´ng cÃ³ quyá»n truy cáº­p. Vai trÃ² yÃªu cáº§u: ${allowedRoles.join(' hoáº·c ')}.`,
+      });
+    }
+
+    next();
+  };
+};
+
+module.exports = { authenticate, authorize };
+
+</file>
+<file name="errorHandler.js">
+const errorHandler = (err, req, res, next) => {
+  console.error('[ERROR]', err.stack || err.message);
+
+  if (err.name === 'SequelizeValidationError') {
+    return res.status(400).json({
+      message: 'Dá»¯ liá»‡u khÃ´ng há»£p lá»‡.',
+      errors: err.errors.map(e => ({ field: e.path, message: e.message })),
+    });
+  }
+
+  if (err.name === 'SequelizeUniqueConstraintError') {
+    return res.status(409).json({
+      message: 'Dá»¯ liá»‡u Ä‘Ã£ tá»“n táº¡i (trÃ¹ng láº·p).',
+      errors: err.errors.map(e => ({ field: e.path, message: e.message })),
+    });
+  }
+
+  if (err.name === 'SequelizeForeignKeyConstraintError') {
+    return res.status(400).json({
+      message: 'Tham chiáº¿u khÃ´ng há»£p lá»‡. Dá»¯ liá»‡u liÃªn quan khÃ´ng tá»“n táº¡i.',
+    });
+  }
+
+  if (err.statusCode) {
+    return res.status(err.statusCode).json({ message: err.message });
+  }
+
+  res.status(500).json({ message: 'Lá»—i server ná»™i bá»™.' });
+};
+
+module.exports = { errorHandler };
+
+</file>
+<file name="Category.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Category = sequelize.define('Category', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING(100), allowNull: false },
+  description: { type: DataTypes.TEXT },
+}, {
+  tableName: 'categories',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = Category;
+
+</file>
+<file name="Customer.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Customer = sequelize.define('Customer', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  customer_code: { type: DataTypes.STRING(20), unique: true, allowNull: false },
+  name: { type: DataTypes.STRING(200), allowNull: false },
+  phone: { type: DataTypes.STRING(20) },
+  email: { type: DataTypes.STRING(100) },
+  address: { type: DataTypes.TEXT },
+}, {
+  tableName: 'customers',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = Customer;
+
+</file>
+<file name="InboundOrder.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const InboundOrder = sequelize.define('InboundOrder', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  inbound_code: { type: DataTypes.STRING(20), unique: true, allowNull: false },
+  warehouse_id: { type: DataTypes.INTEGER },
+  notes: { type: DataTypes.TEXT },
+  status: {
+    type: DataTypes.ENUM('PENDING', 'APPROVED', 'REJECTED'),
+    defaultValue: 'PENDING',
+  },
+  created_by: { type: DataTypes.INTEGER },
+  approved_by: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'inbound_orders',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+});
+
+const InboundOrderItem = sequelize.define('InboundOrderItem', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  inbound_order_id: { type: DataTypes.INTEGER, allowNull: false },
+  product_id: { type: DataTypes.INTEGER },
+  requested_quantity: { type: DataTypes.INTEGER, allowNull: false },
+  assigned_location_id: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'inbound_order_items',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = { InboundOrder, InboundOrderItem };
+
+</file>
+<file name="index.js">
+const sequelize = require('../config/database');
+
+const User = require('./User')(sequelize);
+const Warehouse = require('./Warehouse')(sequelize);
+const Category = require('./Category')(sequelize);
+const Product = require('./Product')(sequelize);
+const Customer = require('./Customer')(sequelize);
+const Location = require('./Location')(sequelize);
+const Inventory = require('./Inventory')(sequelize);
+const InventoryTransaction = require('./InventoryTransaction')(sequelize);
+const { InboundOrder, InboundOrderItem } = require('./InboundOrder')(sequelize);
+const { OutboundOrder, OutboundOrderItem } = require('./OutboundOrder')(sequelize);
+const { SalesOrder, SalesOrderItem } = require('./SalesOrder')(sequelize);
+
+Warehouse.hasMany(Location, { foreignKey: 'warehouse_id', sourceKey: 'id', onDelete: 'CASCADE' });
+Location.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id' });
+
+Location.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'SET NULL' });
+Product.hasMany(Location, { foreignKey: 'product_id', sourceKey: 'id', onDelete: 'SET NULL' });
+
+Category.hasMany(Product, { foreignKey: 'category_id', sourceKey: 'id', onDelete: 'SET NULL' });
+Product.belongsTo(Category, { foreignKey: 'category_id', targetKey: 'id' });
+
+Warehouse.hasMany(InboundOrder, { foreignKey: 'warehouse_id', sourceKey: 'id', onDelete: 'SET NULL' });
+InboundOrder.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id' });
+
+InboundOrder.hasMany(InboundOrderItem, { foreignKey: 'inbound_order_id', sourceKey: 'id', onDelete: 'CASCADE' });
+InboundOrderItem.belongsTo(InboundOrder, { foreignKey: 'inbound_order_id', targetKey: 'id' });
+
+InboundOrderItem.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'SET NULL' });
+InboundOrderItem.belongsTo(Location, { foreignKey: 'assigned_location_id', targetKey: 'id', onDelete: 'SET NULL' });
+
+Warehouse.hasMany(OutboundOrder, { foreignKey: 'warehouse_id', sourceKey: 'id', onDelete: 'SET NULL' });
+OutboundOrder.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id' });
+
+OutboundOrder.hasMany(OutboundOrderItem, { foreignKey: 'outbound_order_id', sourceKey: 'id', onDelete: 'CASCADE' });
+OutboundOrderItem.belongsTo(OutboundOrder, { foreignKey: 'outbound_order_id', targetKey: 'id' });
+
+OutboundOrderItem.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'SET NULL' });
+OutboundOrderItem.belongsTo(Location, { foreignKey: 'picked_location_id', targetKey: 'id', onDelete: 'SET NULL' });
+
+SalesOrder.belongsTo(Customer, { foreignKey: 'customer_id', targetKey: 'id', onDelete: 'SET NULL' });
+SalesOrder.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id', onDelete: 'SET NULL' });
+SalesOrder.hasMany(SalesOrderItem, { foreignKey: 'sales_order_id', sourceKey: 'id', onDelete: 'CASCADE' });
+SalesOrderItem.belongsTo(SalesOrder, { foreignKey: 'sales_order_id', targetKey: 'id' });
+SalesOrderItem.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'SET NULL' });
+
+Inventory.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'CASCADE' });
+Inventory.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id', onDelete: 'CASCADE' });
+Inventory.belongsTo(Location, { foreignKey: 'location_id', targetKey: 'id', onDelete: 'CASCADE' });
+
+InventoryTransaction.belongsTo(Product, { foreignKey: 'product_id', targetKey: 'id', onDelete: 'SET NULL' });
+InventoryTransaction.belongsTo(Warehouse, { foreignKey: 'warehouse_id', targetKey: 'id', onDelete: 'SET NULL' });
+InventoryTransaction.belongsTo(Location, { foreignKey: 'location_id', targetKey: 'id', onDelete: 'SET NULL' });
+InventoryTransaction.belongsTo(User, { foreignKey: 'user_id', targetKey: 'id', onDelete: 'SET NULL' });
+
+InboundOrder.belongsTo(User, { foreignKey: 'created_by', targetKey: 'id', as: 'creator', onDelete: 'SET NULL' });
+InboundOrder.belongsTo(User, { foreignKey: 'approved_by', targetKey: 'id', as: 'approver', onDelete: 'SET NULL' });
+OutboundOrder.belongsTo(User, { foreignKey: 'created_by', targetKey: 'id', as: 'creator', onDelete: 'SET NULL' });
+OutboundOrder.belongsTo(User, { foreignKey: 'approved_by', targetKey: 'id', as: 'approver', onDelete: 'SET NULL' });
+SalesOrder.belongsTo(User, { foreignKey: 'created_by', targetKey: 'id', as: 'creator', onDelete: 'SET NULL' });
+SalesOrder.belongsTo(User, { foreignKey: 'approved_by', targetKey: 'id', as: 'approver', onDelete: 'SET NULL' });
+
+module.exports = {
+  sequelize,
+  User,
+  Warehouse,
+  Category,
+  Product,
+  Customer,
+  Location,
+  Inventory,
+  InventoryTransaction,
+  InboundOrder,
+  InboundOrderItem,
+  OutboundOrder,
+  OutboundOrderItem,
+  SalesOrder,
+  SalesOrderItem,
+};
+
+</file>
+<file name="Inventory.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Inventory = sequelize.define('Inventory', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  product_id: { type: DataTypes.INTEGER, allowNull: false },
+  warehouse_id: { type: DataTypes.INTEGER, allowNull: false },
+  location_id: { type: DataTypes.INTEGER, allowNull: false },
+  quantity: {
+    type: DataTypes.INTEGER,
+    defaultValue: 0,
+    validate: { min: 0 },
+  },
+}, {
+  tableName: 'inventory',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  indexes: [
+    { unique: true, fields: ['product_id', 'warehouse_id', 'location_id'] },
+  ],
+});
+
+module.exports = Inventory;
+
+</file>
+<file name="InventoryTransaction.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const InventoryTransaction = sequelize.define('InventoryTransaction', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  product_id: { type: DataTypes.INTEGER },
+  warehouse_id: { type: DataTypes.INTEGER },
+  location_id: { type: DataTypes.INTEGER },
+  transaction_type: {
+    type: DataTypes.ENUM('INBOUND', 'OUTBOUND', 'SALE', 'ADJUST'),
+    allowNull: false,
+  },
+  reference_type: { type: DataTypes.STRING(30) },
+  reference_id: { type: DataTypes.INTEGER },
+  quantity_change: { type: DataTypes.INTEGER, allowNull: false },
+  quantity_after: { type: DataTypes.INTEGER, allowNull: false },
+  user_id: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'inventory_transactions',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = InventoryTransaction;
+
+</file>
+<file name="Location.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Location = sequelize.define('Location', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  warehouse_id: { type: DataTypes.INTEGER, allowNull: false },
+  bin_code: { type: DataTypes.STRING(30), unique: true, allowNull: false },
+  zone: { type: DataTypes.STRING(10) },
+  aisle: { type: DataTypes.STRING(10) },
+  rack: { type: DataTypes.STRING(10) },
+  shelf: { type: DataTypes.STRING(10) },
+  bin: { type: DataTypes.STRING(10) },
+  status: {
+    type: DataTypes.ENUM('EMPTY', 'FULL'),
+    defaultValue: 'EMPTY',
+  },
+  product_id: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'locations',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = Location;
+
+</file>
+<file name="OutboundOrder.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const OutboundOrder = sequelize.define('OutboundOrder', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  outbound_code: { type: DataTypes.STRING(20), unique: true, allowNull: false },
+  warehouse_id: { type: DataTypes.INTEGER },
+  notes: { type: DataTypes.TEXT },
+  status: {
+    type: DataTypes.ENUM('PENDING', 'APPROVED', 'COMPLETED', 'REJECTED'),
+    defaultValue: 'PENDING',
+  },
+  created_by: { type: DataTypes.INTEGER },
+  approved_by: { type: DataTypes.INTEGER },
+  completed_at: { type: DataTypes.DATE },
+}, {
+  tableName: 'outbound_orders',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+});
+
+const OutboundOrderItem = sequelize.define('OutboundOrderItem', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  outbound_order_id: { type: DataTypes.INTEGER, allowNull: false },
+  product_id: { type: DataTypes.INTEGER },
+  requested_quantity: { type: DataTypes.INTEGER, allowNull: false },
+  picked_quantity: { type: DataTypes.INTEGER, defaultValue: 0 },
+  picked_location_id: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'outbound_order_items',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = { OutboundOrder, OutboundOrderItem };
+
+</file>
+<file name="Product.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Product = sequelize.define('Product', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  sku: { type: DataTypes.STRING(20), unique: true, allowNull: false },
+  name: { type: DataTypes.STRING(200), allowNull: false },
+  category_id: { type: DataTypes.INTEGER },
+  unit: { type: DataTypes.STRING(30), defaultValue: 'CÃ¡i' },
+  price: { type: DataTypes.DECIMAL(12, 2), allowNull: false, defaultValue: 0 },
+  image_url: { type: DataTypes.TEXT },
+}, {
+  tableName: 'products',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+});
+
+module.exports = Product;
+
+</file>
+<file name="SalesOrder.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const SalesOrder = sequelize.define('SalesOrder', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  sales_order_code: { type: DataTypes.STRING(20), unique: true, allowNull: false },
+  customer_id: { type: DataTypes.INTEGER },
+  warehouse_id: { type: DataTypes.INTEGER },
+  total_amount: { type: DataTypes.DECIMAL(14, 2), defaultValue: 0 },
+  status: {
+    type: DataTypes.ENUM('PENDING', 'APPROVED', 'REJECTED', 'PROCESSING', 'COMPLETED'),
+    defaultValue: 'PENDING',
+  },
+  created_by: { type: DataTypes.INTEGER },
+  approved_by: { type: DataTypes.INTEGER },
+}, {
+  tableName: 'sales_orders',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+});
+
+const SalesOrderItem = sequelize.define('SalesOrderItem', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  sales_order_id: { type: DataTypes.INTEGER, allowNull: false },
+  product_id: { type: DataTypes.INTEGER },
+  quantity: { type: DataTypes.INTEGER, allowNull: false },
+  unit_price: { type: DataTypes.DECIMAL(12, 2), allowNull: false },
+}, {
+  tableName: 'sales_order_items',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = { SalesOrder, SalesOrderItem };
+
+</file>
+<file name="User.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+const bcrypt = require('bcryptjs');
+
+const User = sequelize.define('User', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  username: { type: DataTypes.STRING(50), unique: true, allowNull: false },
+  email: { type: DataTypes.STRING(100), unique: true, allowNull: false },
+  password_hash: { type: DataTypes.STRING(255), allowNull: false },
+  full_name: { type: DataTypes.STRING(100), allowNull: false },
+  role: {
+    type: DataTypes.ENUM('ADMIN', 'MANAGER', 'KHO', 'SALES'),
+    allowNull: false,
+  },
+  is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
+}, {
+  tableName: 'users',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: 'updated_at',
+  hooks: {
+    beforeCreate: async (user) => {
+      if (user.password_hash && !user.password_hash.startsWith('$2')) {
+        user.password_hash = await bcrypt.hash(user.password_hash, 10);
+      }
+    },
+    beforeUpdate: async (user) => {
+      if (user.changed('password_hash') && !user.password_hash.startsWith('$2')) {
+        user.password_hash = await bcrypt.hash(user.password_hash, 10);
+      }
+    },
+  },
+});
+
+User.prototype.comparePassword = async function (candidatePassword) {
+  return bcrypt.compare(candidatePassword, this.password_hash);
+};
+
+User.prototype.toJSON = function () {
+  const values = { ...this.get() };
+  delete values.password_hash;
+  return values;
+};
+
+module.exports = User;
+
+</file>
+<file name="Warehouse.js">
+const { DataTypes } = require('sequelize');
+const sequelize = require('../config/database');
+
+const Warehouse = sequelize.define('Warehouse', {
+  id: { type: DataTypes.INTEGER, primaryKey: true, autoIncrement: true },
+  name: { type: DataTypes.STRING(100), allowNull: false },
+  address: { type: DataTypes.TEXT },
+  total_capacity: { type: DataTypes.INTEGER, defaultValue: 0 },
+  is_active: { type: DataTypes.BOOLEAN, defaultValue: true },
+}, {
+  tableName: 'warehouses',
+  timestamps: true,
+  createdAt: 'created_at',
+  updatedAt: false,
+});
+
+module.exports = Warehouse;
+
+</file>
+<file name="auth.routes.js">
+const express = require('express');
+const { body } = require('express-validator');
+const router = express.Router();
+const authController = require('../controllers/auth.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.post(
+  '/login',
+  [
+    body('username').notEmpty().withMessage('TÃªn Ä‘Äƒng nháº­p lÃ  báº¯t buá»™c.'),
+    body('password').notEmpty().withMessage('Máº­t kháº©u lÃ  báº¯t buá»™c.'),
+  ],
+  authController.login
+);
+
+router.post(
+  '/register',
+  authenticate,
+  authorize('ADMIN'),
+  [
+    body('username').notEmpty().isLength({ min: 3 }).withMessage('TÃªn Ä‘Äƒng nháº­p tá»‘i thiá»ƒu 3 kÃ½ tá»±.'),
+    body('email').isEmail().withMessage('Email khÃ´ng há»£p lá»‡.'),
+    body('password').isLength({ min: 6 }).withMessage('Máº­t kháº©u tá»‘i thiá»ƒu 6 kÃ½ tá»±.'),
+    body('full_name').notEmpty().withMessage('Há» tÃªn lÃ  báº¯t buá»™c.'),
+    body('role').isIn(['ADMIN', 'MANAGER', 'KHO', 'SALES']).withMessage('Vai trÃ² khÃ´ng há»£p lá»‡.'),
+  ],
+  authController.register
+);
+
+router.get('/me', authenticate, authController.getMe);
+
+module.exports = router;
+
+</file>
+<file name="category.routes.js">
+const express = require('express');
+const { body } = require('express-validator');
+const router = express.Router();
+const categoryController = require('../controllers/category.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', categoryController.getAll);
+router.get('/:id', categoryController.getById);
+router.post(
+  '/',
+  authorize('ADMIN'),
+  [body('name').notEmpty().withMessage('TÃªn danh má»¥c lÃ  báº¯t buá»™c.')],
+  categoryController.create
+);
+router.put('/:id', authorize('ADMIN'), categoryController.updateById);
+router.delete('/:id', authorize('ADMIN'), categoryController.deleteById);
+
+module.exports = router;
+
+</file>
+<file name="customer.routes.js">
+const express = require('express');
+const router = express.Router();
+const customerController = require('../controllers/customer.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('SALES', 'MANAGER', 'ADMIN'), customerController.getAll);
+router.get('/:id', customerController.getById);
+router.post('/', authorize('SALES', 'ADMIN'), customerController.create);
+router.put('/:id', authorize('SALES', 'ADMIN'), customerController.updateById);
+router.delete('/:id', authorize('ADMIN'), customerController.deleteById);
+
+module.exports = router;
+
+</file>
+<file name="inbound.routes.js">
+const express = require('express');
+const router = express.Router();
+const inboundController = require('../controllers/inbound.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('ADMIN', 'MANAGER', 'KHO'), inboundController.getAll);
+router.get('/suggest-bins', authorize('ADMIN', 'MANAGER', 'KHO'), inboundController.suggestBins);
+router.get('/:id', authorize('ADMIN', 'MANAGER', 'KHO'), inboundController.getById);
+router.post('/', authorize('ADMIN', 'KHO'), inboundController.create);
+router.put('/:id/approve', authorize('ADMIN', 'MANAGER'), inboundController.approve);
+router.put('/:id/reject', authorize('ADMIN', 'MANAGER'), inboundController.reject);
+
+module.exports = router;
+
+</file>
+<file name="inventory.routes.js">
+const express = require('express');
+const router = express.Router();
+const inventoryController = require('../controllers/inventory.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/pivot', authorize('ADMIN', 'MANAGER'), inventoryController.getPivotReport);
+router.get('/', authorize('ADMIN', 'MANAGER', 'KHO'), inventoryController.getByWarehouse);
+router.get('/stock/:productId', inventoryController.getStockByProduct);
+router.get('/trace/:productId', authorize('ADMIN', 'MANAGER', 'KHO'), inventoryController.traceProduct);
+
+module.exports = router;
+
+</file>
+<file name="location.routes.js">
+const express = require('express');
+const router = express.Router();
+const locationController = require('../controllers/location.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('ADMIN', 'MANAGER', 'KHO'), locationController.getAll);
+router.get('/suggest', authorize('ADMIN', 'MANAGER', 'KHO'), locationController.getSuggest);
+
+module.exports = router;
+
+</file>
+<file name="outbound.routes.js">
+const express = require('express');
+const router = express.Router();
+const outboundController = require('../controllers/outbound.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('ADMIN', 'MANAGER', 'KHO'), outboundController.getAll);
+router.get('/:id', authorize('ADMIN', 'MANAGER', 'KHO'), outboundController.getById);
+router.post('/', authorize('ADMIN', 'KHO'), outboundController.create);
+router.put('/:id/approve', authorize('ADMIN', 'MANAGER'), outboundController.approve);
+router.put('/:id/complete', authorize('ADMIN', 'MANAGER', 'KHO'), outboundController.complete);
+router.put('/:id/reject', authorize('ADMIN', 'MANAGER'), outboundController.reject);
+
+module.exports = router;
+
+</file>
+<file name="product.routes.js">
+const express = require('express');
+const { body } = require('express-validator');
+const router = express.Router();
+const productController = require('../controllers/product.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', productController.getAll);
+router.get('/:id', productController.getById);
+router.post(
+  '/',
+  authorize('ADMIN'),
+  [
+    body('name').notEmpty().withMessage('TÃªn sáº£n pháº©m lÃ  báº¯t buá»™c.'),
+    body('price').isFloat({ min: 0 }).withMessage('GiÃ¡ pháº£i >= 0.'),
+  ],
+  productController.create
+);
+router.put('/:id', authorize('ADMIN'), productController.updateById);
+router.delete('/:id', authorize('ADMIN'), productController.deleteById);
+
+module.exports = router;
+
+</file>
+<file name="report.routes.js">
+const express = require('express');
+const router = express.Router();
+const reportController = require('../controllers/report.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/dashboard', reportController.getDashboardStats);
+router.get('/inventory-summary', authorize('ADMIN', 'MANAGER'), reportController.getInventorySummary);
+router.get('/inbound-summary', authorize('ADMIN', 'MANAGER'), reportController.getInboundSummary);
+router.get('/outbound-summary', authorize('ADMIN', 'MANAGER'), reportController.getOutboundSummary);
+router.get('/sales-summary', authorize('ADMIN'), reportController.getSalesSummary);
+
+module.exports = router;
+
+</file>
+<file name="sales.routes.js">
+const express = require('express');
+const router = express.Router();
+const salesController = require('../controllers/sales.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('SALES', 'MANAGER', 'ADMIN'), salesController.getAll);
+router.get('/stock-check', salesController.checkStock);
+router.get('/:id', salesController.getById);
+router.post('/', authorize('SALES', 'ADMIN'), salesController.create);
+router.put('/:id/approve', authorize('MANAGER', 'ADMIN'), salesController.approve);
+router.put('/:id/reject', authorize('MANAGER', 'ADMIN'), salesController.reject);
+
+module.exports = router;
+
+</file>
+<file name="user.routes.js">
+const express = require('express');
+const router = express.Router();
+const userController = require('../controllers/user.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', authorize('ADMIN'), userController.getAll);
+router.get('/:id', userController.getById);
+router.put('/:id', authorize('ADMIN'), userController.updateById);
+router.delete('/:id', authorize('ADMIN'), userController.deleteById);
+
+module.exports = router;
+
+</file>
+<file name="warehouse.routes.js">
+const express = require('express');
+const { body } = require('express-validator');
+const router = express.Router();
+const warehouseController = require('../controllers/warehouse.controller');
+const { authenticate, authorize } = require('../middleware/auth.middleware');
+
+router.use(authenticate);
+
+router.get('/', warehouseController.getAll);
+router.get('/:id', warehouseController.getById);
+router.post(
+  '/',
+  authorize('ADMIN'),
+  [
+    body('name').notEmpty().withMessage('TÃªn kho lÃ  báº¯t buá»™c.'),
+    body('total_capacity')
+      .isInt({ min: 0, max: 10000 })
+      .withMessage('Sá»©c chá»©a pháº£i tá»« 0 Ä‘áº¿n 10000.'),
+  ],
+  warehouseController.create
+);
+router.put('/:id', authorize('ADMIN'), warehouseController.updateById);
+router.delete('/:id', authorize('ADMIN'), warehouseController.deleteById);
+
+module.exports = router;
+
+</file>
+<file name="auth.service.js">
+const { User } = require('../models');
+const { signToken } = require('../services/auth.service');
+const { AppError } = require('../utils/AppError');
+
+const login = async (username, password) => {
+  const user = await User.findOne({ where: { username } });
+
+  if (!user) {
+    throw new AppError('TÃªn Ä‘Äƒng nháº­p hoáº·c máº­t kháº©u khÃ´ng Ä‘Ãºng.', 401);
+  }
+
+  if (!user.is_active) {
+    throw new AppError('TÃ i khoáº£n Ä‘Ã£ bá»‹ vÃ´ hiá»‡u hÃ³a.', 403);
+  }
+
+  const isMatch = await user.comparePassword(password);
+  if (!isMatch) {
+    throw new AppError('TÃªn Ä‘Äƒng nháº­p hoáº·c máº­t kháº©u khÃ´ng Ä‘Ãºng.', 401);
+  }
+
+  const token = signToken(user.id);
+  const userData = user.toJSON();
+
+  return { token, user: userData };
+};
+
+const register = async (userData) => {
+  const existing = await User.findOne({ where: { username: userData.username } });
+  if (existing) {
+    throw new AppError('TÃªn Ä‘Äƒng nháº­p Ä‘Ã£ tá»“n táº¡i.', 409);
+  }
+
+  const existingEmail = await User.findOne({ where: { email: userData.email } });
+  if (existingEmail) {
+    throw new AppError('Email Ä‘Ã£ Ä‘Æ°á»£c sá»­ dá»¥ng.', 409);
+  }
+
+  const user = await User.create(userData);
+  return user.toJSON();
+};
+
+const getMe = async (userId) => {
+  const user = await User.findByPk(userId, {
+    attributes: { exclude: ['password_hash'] },
+  });
+  if (!user) {
+    throw new AppError('NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i.', 404);
+  }
+  return user.toJSON();
+};
+
+module.exports = { login, register, getMe };
+
+</file>
+<file name="category.service.js">
+const { Category } = require('../models');
+const { AppError } = require('../utils/AppError');
+
+const getAll = async () => Category.findAll({ order: [['id', 'ASC']] });
+const getById = async (id) => {
+  const cat = await Category.findByPk(id);
+  if (!cat) throw new AppError('Danh má»¥c khÃ´ng tá»“n táº¡i.', 404);
+  return cat.toJSON();
+};
+const create = async (data) => {
+  const existing = await Category.findOne({ where: { name: data.name } });
+  if (existing) throw new AppError('TÃªn danh má»¥c Ä‘Ã£ tá»“n táº¡i.', 409);
+  const cat = await Category.create(data);
+  return cat.toJSON();
+};
+const updateById = async (id, data) => {
+  const cat = await Category.findByPk(id);
+  if (!cat) throw new AppError('Danh má»¥c khÃ´ng tá»“n táº¡i.', 404);
+  await cat.update(data);
+  return cat.toJSON();
+};
+const deleteById = async (id) => {
+  const cat = await Category.findByPk(id);
+  if (!cat) throw new AppError('Danh má»¥c khÃ´ng tá»“n táº¡i.', 404);
+  await cat.destroy();
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="customer.service.js">
+const { Customer } = require('../models');
+const { AppError } = require('../utils/AppError');
+const { getNextCode } = require('../utils/codeGenerator');
+
+const getAll = async (queryParams) => {
+  const { search } = queryParams;
+  const where = {};
+  if (search) {
+    const { Op } = require('sequelize');
+    where[Op.or] = [
+      { name: { [Op.iLike]: `%${search}%` } },
+      { customer_code: { [Op.iLike]: `%${search}%` } },
+      { phone: { [Op.iLike]: `%${search}%` } },
+    ];
+  }
+  return Customer.findAll({ where, order: [['id', 'ASC']] });
+};
+
+const getById = async (id) => {
+  const customer = await Customer.findByPk(id);
+  if (!customer) throw new AppError('KhÃ¡ch hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+  return customer.toJSON();
+};
+
+const create = async (data) => {
+  const code = await getNextCode('KH', 'seq_customer');
+  return Customer.create({ ...data, customer_code: code });
+};
+
+const updateById = async (id, data) => {
+  const customer = await Customer.findByPk(id);
+  if (!customer) throw new AppError('KhÃ¡ch hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+  await customer.update(data);
+  return customer.toJSON();
+};
+
+const deleteById = async (id) => {
+  const customer = await Customer.findByPk(id);
+  if (!customer) throw new AppError('KhÃ¡ch hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+  await customer.destroy();
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="inbound.service.js">
+const { query, transaction } = require('../config/database');
+const { AppError } = require('../utils/AppError');
+const { getNextCode } = require('../utils/codeGenerator');
+
+const getAll = async (queryParams) => {
+  const { warehouse_id, status, search } = queryParams;
+  const where = {};
+  if (warehouse_id) where.warehouse_id = parseInt(warehouse_id, 10);
+  if (status) where.status = status;
+
+  const result = await query(`
+    SELECT
+      io.id, io.inbound_code, io.warehouse_id, io.notes, io.status,
+      io.created_by, io.approved_by,
+      w.name as warehouse_name,
+      u1.full_name as created_by_name,
+      u2.full_name as approved_by_name,
+      io.created_at, io.updated_at,
+      (
+        SELECT json_agg(json_build_object(
+          'id', i.id,
+          'product_id', i.product_id,
+          'requested_quantity', i.requested_quantity,
+          'assigned_location_id', i.assigned_location_id,
+          'product_name', p.name,
+          'product_sku', p.sku,
+          'bin_code', l.bin_code
+        ))
+        FROM inbound_order_items i
+        LEFT JOIN products p ON i.product_id = p.id
+        LEFT JOIN locations l ON i.assigned_location_id = l.id
+        WHERE i.inbound_order_id = io.id
+      ) as items
+    FROM inbound_orders io
+    JOIN warehouses w ON io.warehouse_id = w.id
+    LEFT JOIN users u1 ON io.created_by = u1.id
+    LEFT JOIN users u2 ON io.approved_by = u2.id
+    WHERE ($1::int IS NULL OR io.warehouse_id = $1)
+      AND ($2::varchar IS NULL OR io.status = $2)
+    ORDER BY io.created_at DESC
+  `, [warehouse_id || null, status || null]);
+
+  return result.rows;
+};
+
+const getById = async (id) => {
+  const result = await query(`
+    SELECT
+      io.*, w.name as warehouse_name,
+      u1.full_name as created_by_name,
+      u2.full_name as approved_by_name
+    FROM inbound_orders io
+    JOIN warehouses w ON io.warehouse_id = w.id
+    LEFT JOIN users u1 ON io.created_by = u1.id
+    LEFT JOIN users u2 ON io.approved_by = u2.id
+    WHERE io.id = $1
+  `, [id]);
+
+  if (!result.rows.length) throw new AppError('Phiáº¿u nháº­p khÃ´ng tá»“n táº¡i.', 404);
+
+  const itemsResult = await query(`
+    SELECT i.*, p.name as product_name, p.sku as product_sku, l.bin_code
+    FROM inbound_order_items i
+    JOIN products p ON i.product_id = p.id
+    LEFT JOIN locations l ON i.assigned_location_id = l.id
+    WHERE i.inbound_order_id = $1
+  `, [id]);
+
+  return { ...result.rows[0], items: itemsResult.rows };
+};
+
+const create = async (data, userId) => {
+  const { warehouse_id, notes, items } = data;
+
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+  if (!items || items.length === 0) throw new AppError('Danh sÃ¡ch sáº£n pháº©m khÃ´ng Ä‘Æ°á»£c trá»‘ng.', 400);
+
+  const t = await transaction();
+
+  try {
+    const inboundCode = await getNextCode('INB', 'seq_inbound');
+
+    const orderResult = await t.query(
+      `INSERT INTO inbound_orders (inbound_code, warehouse_id, notes, status, created_by)
+       VALUES ($1, $2, $3, 'PENDING', $4)
+       RETURNING id, inbound_code`,
+      [inboundCode, warehouse_id, notes || null, userId]
+    );
+    const orderId = orderResult.rows[0].id;
+
+    for (const item of items) {
+      if (!item.product_id || !item.requested_quantity || item.requested_quantity <= 0) {
+        throw new AppError('Má»—i sáº£n pháº©m cáº§n cÃ³ product_id vÃ  requested_quantity > 0.', 400);
+      }
+
+      await t.query(
+        `INSERT INTO inbound_order_items (inbound_order_id, product_id, requested_quantity)
+         VALUES ($1, $2, $3)`,
+        [orderId, item.product_id, item.requested_quantity]
+      );
+    }
+
+    await t.commit();
+    return getById(orderId);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const approve = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('Phiáº¿u nháº­p khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ duyá»‡t phiáº¿u Ä‘ang chá».', 400);
+
+  const t = await transaction();
+
+  try {
+    const emptyLocations = await Location.findAll({
+      where: { warehouse_id: order.warehouse_id, status: 'EMPTY' },
+      order: [['zone', 'ASC'], ['aisle', 'ASC'], ['rack', 'ASC'], ['shelf', 'ASC'], ['bin', 'ASC']],
+      transaction: t,
+    });
+
+    if (emptyLocations.length === 0) {
+      throw new AppError('Kho khÃ´ng cÃ²n vá»‹ trÃ­ trá»‘ng nÃ o.', 400);
+    }
+
+    let locationIndex = 0;
+
+    for (const item of order.items) {
+      const suggestedLocations = [];
+      let remaining = item.requested_quantity;
+
+      while (remaining > 0 && locationIndex < emptyLocations.length) {
+        const loc = emptyLocations[locationIndex];
+        suggestedLocations.push({ location_id: loc.id, bin_code: loc.bin_code, qty: 1 });
+        locationIndex++;
+        remaining--;
+      }
+
+      if (remaining > 0) {
+        throw new AppError(`KhÃ´ng Ä‘á»§ ká»‡ trá»‘ng cho sáº£n pháº©m ${item.product_name || item.product_id}.`, 400);
+      }
+
+      for (const sugg of suggestedLocations) {
+        await t.query(
+          `INSERT INTO inventory (product_id, warehouse_id, location_id, quantity)
+           VALUES ($1, $2, $3, 1)
+           ON CONFLICT (product_id, warehouse_id, location_id)
+           DO UPDATE SET quantity = inventory.quantity + 1, updated_at = NOW()`,
+          [item.product_id, order.warehouse_id, sugg.location_id]
+        );
+
+        await t.query(
+          `UPDATE locations SET status = 'FULL', product_id = $1 WHERE id = $2`,
+          [item.product_id, sugg.location_id]
+        );
+
+        const invResult = await t.query(
+          `SELECT COALESCE(MAX(quantity_after), 0) + 1 as next_qty FROM inventory_transactions
+           WHERE product_id = $1 AND warehouse_id = $2 AND location_id = $3`,
+          [item.product_id, order.warehouse_id, sugg.location_id]
+        );
+
+        await t.query(
+          `INSERT INTO inventory_transactions
+           (product_id, warehouse_id, location_id, transaction_type, reference_type, reference_id, quantity_change, quantity_after, user_id)
+           VALUES ($1, $2, $3, 'INBOUND', 'inbound_order', $4, 1, $5, $6)`,
+          [item.product_id, order.warehouse_id, sugg.location_id, id, invResult.rows[0].next_qty, userId]
+        );
+
+        await t.query(
+          `UPDATE inbound_order_items SET assigned_location_id = $1 WHERE id = $2`,
+          [sugg.location_id, item.id]
+        );
+      }
+    }
+
+    await t.query(
+      `UPDATE inbound_orders SET status = 'APPROVED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+      [userId, id]
+    );
+
+    await t.commit();
+    return getById(id);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const reject = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('Phiáº¿u nháº­p khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ tá»« chá»‘i phiáº¿u Ä‘ang chá».', 400);
+
+  await query(
+    `UPDATE inbound_orders SET status = 'REJECTED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+    [userId, id]
+  );
+
+  return getById(id);
+};
+
+const suggestBins = async (warehouse_id, product_id, qty) => {
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+
+  const result = await query(`
+    SELECT id, bin_code, zone, aisle, rack, shelf, bin
+    FROM locations
+    WHERE warehouse_id = $1 AND status = 'EMPTY'
+    ORDER BY zone ASC, aisle ASC, rack ASC, shelf ASC, bin ASC
+    LIMIT $2
+  `, [warehouse_id, qty || 50]);
+
+  return {
+    warehouse_id,
+    total_empty: result.rowCount,
+    suggestions: result.rows.map((l, i) => ({
+      priority: i < 5 ? 'HIGH' : 'NORMAL',
+      ...l,
+    })),
+  };
+};
+
+module.exports = { getAll, getById, create, approve, reject, suggestBins };
+
+</file>
+<file name="inventory.service.js">
+const { query } = require('../config/database');
+const { AppError } = require('../utils/AppError');
+
+const getPivotReport = async () => {
+  const warehouseResult = await query(`
+    SELECT id, name FROM warehouses WHERE is_active = true ORDER BY id ASC
+  `);
+
+  const warehouses = warehouseResult.rows;
+  const productResult = await query(`
+    SELECT id, sku, name FROM products ORDER BY name ASC
+  `);
+
+  const products = productResult.rows;
+  const warehouseIds = warehouses.map(w => w.id);
+  const warehouseNames = warehouses.map(w => w.name);
+
+  const pivotResult = await query(`
+    SELECT
+      p.id,
+      p.sku,
+      p.name,
+      ${warehouseIds.map((wid, i) =>
+        `COALESCE(SUM(i${i}.quantity), 0) as "warehouse_${wid}"`).join(',\n')}
+    FROM products p
+    LEFT JOIN inventory i1 ON p.id = i1.product_id
+    ${warehouseIds.slice(1).map((_, i) =>
+      `LEFT JOIN inventory i${i+1} ON p.id = i${i+1}.product_id AND i${i+1}.warehouse_id = ${warehouseIds[i+1]}`).join('\n')}
+    GROUP BY p.id, p.sku, p.name
+    ORDER BY p.name
+  `);
+
+  return {
+    warehouses: warehouseNames,
+    columns: ['sku', 'name', ...warehouseIds.map(id => `warehouse_${id}`), 'total'],
+    rows: pivotResult.rows.map(row => {
+      const total = warehouseIds.reduce((sum, wid) => sum + parseInt(row[`warehouse_${wid}`] || 0, 10), 0);
+      return { ...row, total };
+    }),
+  };
+};
+
+const getByWarehouse = async (warehouse_id) => {
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+
+  const result = await query(`
+    SELECT
+      i.id,
+      i.product_id,
+      p.sku,
+      p.name as product_name,
+      p.unit,
+      i.warehouse_id,
+      w.name as warehouse_name,
+      i.location_id,
+      l.bin_code,
+      i.quantity
+    FROM inventory i
+    JOIN products p ON i.product_id = p.id
+    JOIN warehouses w ON i.warehouse_id = w.id
+    LEFT JOIN locations l ON i.location_id = l.id
+    WHERE i.warehouse_id = $1 AND i.quantity > 0
+    ORDER BY p.name
+  `, [warehouse_id]);
+
+  return result.rows;
+};
+
+const getStockByProduct = async (productId) => {
+  const result = await query(`
+    SELECT
+      i.warehouse_id,
+      w.name as warehouse_name,
+      COALESCE(SUM(i.quantity), 0) as total_quantity
+    FROM inventory i
+    JOIN warehouses w ON i.warehouse_id = w.id
+    WHERE i.product_id = $1 AND i.quantity > 0
+    GROUP BY i.warehouse_id, w.name
+  `, [productId]);
+
+  const grandTotal = result.rows.reduce((sum, r) => sum + parseInt(r.total_quantity, 10), 0);
+
+  return {
+    product_id: productId,
+    total_stock: grandTotal,
+    by_warehouse: result.rows,
+  };
+};
+
+const traceProduct = async (productId) => {
+  const result = await query(`
+    SELECT
+      l.id as location_id,
+      l.bin_code,
+      l.zone,
+      i.warehouse_id,
+      w.name as warehouse_name,
+      i.quantity,
+      it.quantity_change,
+      it.created_at
+    FROM inventory i
+    JOIN locations l ON i.location_id = l.id
+    JOIN warehouses w ON i.warehouse_id = w.id
+    LEFT JOIN inventory_transactions it ON it.product_id = i.product_id
+      AND it.location_id = i.location_id AND it.warehouse_id = i.warehouse_id
+    WHERE i.product_id = $1 AND i.quantity > 0
+    ORDER BY it.created_at ASC NULLS LAST
+  `, [productId]);
+
+  return result.rows;
+};
+
+module.exports = { getPivotReport, getByWarehouse, getStockByProduct, traceProduct };
+
+</file>
+<file name="location.service.js">
+const { Location, Warehouse, Product } = require('../models');
+const { AppError } = require('../utils/AppError');
+
+const getAll = async (queryParams) => {
+  const { warehouse_id, status, search } = queryParams;
+  const where = {};
+  if (warehouse_id) where.warehouse_id = parseInt(warehouse_id, 10);
+  if (status) where.status = status;
+  if (search) {
+    const { Op } = require('sequelize');
+    where.bin_code = { [Op.iLike]: `%${search}%` };
+  }
+  return Location.findAll({
+    where,
+    include: [
+      { model: Warehouse, as: 'Warehouse', attributes: ['id', 'name'] },
+      { model: Product, as: 'Product', attributes: ['id', 'sku', 'name'] },
+    ],
+    order: [['bin_code', 'ASC']],
+  });
+};
+
+const getSuggest = async (warehouse_id, product_id, qty) => {
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+
+  const emptyLocations = await Location.findAll({
+    where: { warehouse_id: parseInt(warehouse_id, 10), status: 'EMPTY' },
+    order: [['zone', 'ASC'], ['aisle', 'ASC'], ['rack', 'ASC'], ['shelf', 'ASC'], ['bin', 'ASC']],
+    limit: parseInt(qty, 10) || 50,
+  });
+
+  return {
+    warehouse_id: parseInt(warehouse_id, 10),
+    empty_bins_count: emptyLocations.length,
+    suggestions: emptyLocations.map(l => ({
+      location_id: l.id,
+      bin_code: l.bin_code,
+      zone: l.zone,
+      priority: 'HIGH',
+    })),
+  };
+};
+
+module.exports = { getAll, getSuggest };
+
+</file>
+<file name="outbound.service.js">
+const { query, transaction } = require('../config/database');
+const { AppError } = require('../utils/AppError');
+const { getNextCode } = require('../utils/codeGenerator');
+
+const getAll = async (queryParams) => {
+  const { warehouse_id, status } = queryParams;
+  const result = await query(`
+    SELECT
+      oo.id, oo.outbound_code, oo.warehouse_id, oo.notes, oo.status,
+      oo.created_by, oo.approved_by, oo.completed_at,
+      w.name as warehouse_name,
+      u1.full_name as created_by_name,
+      u2.full_name as approved_by_name,
+      oo.created_at, oo.updated_at,
+      (
+        SELECT json_agg(json_build_object(
+          'id', o.id,
+          'product_id', o.product_id,
+          'requested_quantity', o.requested_quantity,
+          'picked_quantity', o.picked_quantity,
+          'picked_location_id', o.picked_location_id,
+          'product_name', p.name,
+          'product_sku', p.sku,
+          'bin_code', l.bin_code
+        ))
+        FROM outbound_order_items o
+        LEFT JOIN products p ON o.product_id = p.id
+        LEFT JOIN locations l ON o.picked_location_id = l.id
+        WHERE o.outbound_order_id = oo.id
+      ) as items
+    FROM outbound_orders oo
+    JOIN warehouses w ON oo.warehouse_id = w.id
+    LEFT JOIN users u1 ON oo.created_by = u1.id
+    LEFT JOIN users u2 ON oo.approved_by = u2.id
+    WHERE ($1::int IS NULL OR oo.warehouse_id = $1)
+      AND ($2::varchar IS NULL OR oo.status = $2)
+    ORDER BY oo.created_at DESC
+  `, [warehouse_id || null, status || null]);
+
+  return result.rows;
+};
+
+const getById = async (id) => {
+  const result = await query(`
+    SELECT oo.*, w.name as warehouse_name,
+      u1.full_name as created_by_name, u2.full_name as approved_by_name
+    FROM outbound_orders oo
+    JOIN warehouses w ON oo.warehouse_id = w.id
+    LEFT JOIN users u1 ON oo.created_by = u1.id
+    LEFT JOIN users u2 ON oo.approved_by = u2.id
+    WHERE oo.id = $1
+  `, [id]);
+
+  if (!result.rows.length) throw new AppError('Phiáº¿u xuáº¥t khÃ´ng tá»“n táº¡i.', 404);
+
+  const itemsResult = await query(`
+    SELECT oi.*, p.name as product_name, p.sku as product_sku,
+      l.bin_code, l.zone
+    FROM outbound_order_items oi
+    JOIN products p ON oi.product_id = p.id
+    LEFT JOIN locations l ON oi.picked_location_id = l.id
+    WHERE oi.outbound_order_id = $1
+  `, [id]);
+
+  return { ...result.rows[0], items: itemsResult.rows };
+};
+
+const create = async (data, userId) => {
+  const { warehouse_id, notes, items } = data;
+
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+  if (!items || items.length === 0) throw new AppError('Danh sÃ¡ch sáº£n pháº©m khÃ´ng Ä‘Æ°á»£c trá»‘ng.', 400);
+
+  for (const item of items) {
+    if (!item.product_id || !item.requested_quantity || item.requested_quantity <= 0) {
+      throw new AppError('Má»—i sáº£n pháº©m cáº§n cÃ³ product_id vÃ  requested_quantity > 0.', 400);
+    }
+  }
+
+  const t = await transaction();
+
+  try {
+    const outboundCode = await getNextCode('OTB', 'seq_outbound');
+
+    const orderResult = await t.query(
+      `INSERT INTO outbound_orders (outbound_code, warehouse_id, notes, status, created_by)
+       VALUES ($1, $2, $3, 'PENDING', $4)
+       RETURNING id, outbound_code`,
+      [outboundCode, warehouse_id, notes || null, userId]
+    );
+    const orderId = orderResult.rows[0].id;
+
+    for (const item of items) {
+      await t.query(
+        `INSERT INTO outbound_order_items (outbound_order_id, product_id, requested_quantity)
+         VALUES ($1, $2, $3)`,
+        [orderId, item.product_id, item.requested_quantity]
+      );
+    }
+
+    await t.commit();
+    return getById(orderId);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const approve = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('Phiáº¿u xuáº¥t khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ duyá»‡t phiáº¿u Ä‘ang chá».', 400);
+
+  await query(
+    `UPDATE outbound_orders SET status = 'APPROVED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+    [userId, id]
+  );
+
+  return getById(id);
+};
+
+const complete = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('Phiáº¿u xuáº¥t khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'APPROVED') throw new AppError('Chá»‰ hoÃ n táº¥t phiáº¿u Ä‘Ã£ duyá»‡t.', 400);
+
+  const t = await transaction();
+
+  try {
+    for (const item of order.items) {
+      let remaining = item.requested_quantity;
+
+      const binsResult = await t.query(`
+        SELECT i.id as inv_id, i.location_id, i.quantity as available_qty,
+          l.bin_code, l.zone
+        FROM inventory i
+        JOIN locations l ON i.location_id = l.id
+        WHERE i.product_id = $1 AND i.warehouse_id = $2 AND i.quantity > 0
+        ORDER BY i.updated_at ASC
+        FOR UPDATE
+      `, [item.product_id, order.warehouse_id]);
+
+      if (binsResult.rows.length === 0) {
+        throw new AppError(`Sáº£n pháº©m ${item.product_name || item.product_id} khÃ´ng cÃ³ trong kho.`, 400);
+      }
+
+      const totalAvailable = binsResult.rows.reduce((s, r) => s + parseInt(r.available_qty, 10), 0);
+      if (totalAvailable < remaining) {
+        throw new AppError(
+          `Sáº£n pháº©m ${item.product_name || item.product_id}: chá»‰ cÃ²n ${totalAvailable}, cáº§n ${remaining}.`,
+          400
+        );
+      }
+
+      for (const bin of binsResult.rows) {
+        if (remaining <= 0) break;
+
+        const pickFromBin = Math.min(remaining, parseInt(bin.available_qty, 10));
+
+        await t.query(
+          `UPDATE inventory SET quantity = quantity - $1, updated_at = NOW()
+           WHERE id = $2`,
+          [pickFromBin, bin.inv_id]
+        );
+
+        if (parseInt(bin.available_qty, 10) - pickFromBin === 0) {
+          await t.query(
+            `UPDATE locations SET status = 'EMPTY', product_id = NULL WHERE id = $1`,
+            [bin.location_id]
+          );
+        }
+
+        const lastQtyResult = await t.query(
+          `SELECT COALESCE(MAX(quantity_after), 0) as last_qty FROM inventory_transactions
+           WHERE product_id = $1 AND warehouse_id = $2 AND location_id = $3`,
+          [item.product_id, order.warehouse_id, bin.location_id]
+        );
+
+        await t.query(
+          `INSERT INTO inventory_transactions
+           (product_id, warehouse_id, location_id, transaction_type, reference_type, reference_id, quantity_change, quantity_after, user_id)
+           VALUES ($1, $2, $3, 'OUTBOUND', 'outbound_order', $4, $5, $6, $7)`,
+          [
+            item.product_id, order.warehouse_id, bin.location_id, id,
+            -pickFromBin,
+            parseInt(lastQtyResult.rows[0].last_qty, 10) - pickFromBin,
+            userId
+          ]
+        );
+
+        await t.query(
+          `UPDATE outbound_order_items SET picked_quantity = picked_quantity + $1, picked_location_id = $2 WHERE id = $3`,
+          [pickFromBin, bin.location_id, item.id]
+        );
+
+        remaining -= pickFromBin;
+      }
+    }
+
+    await t.query(
+      `UPDATE outbound_orders SET status = 'COMPLETED', completed_at = NOW(), updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+
+    await t.commit();
+    return getById(id);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const reject = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('Phiáº¿u xuáº¥t khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ tá»« chá»‘i phiáº¿u Ä‘ang chá».', 400);
+
+  await query(
+    `UPDATE outbound_orders SET status = 'REJECTED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+    [userId, id]
+  );
+
+  return getById(id);
+};
+
+module.exports = { getAll, getById, create, approve, complete, reject };
+
+</file>
+<file name="product.service.js">
+const { Product, Category } = require('../models');
+const { AppError } = require('../utils/AppError');
+const { getNextCode } = require('../utils/codeGenerator');
+
+const getAll = async (queryParams) => {
+  const { category_id, search } = queryParams;
+  const where = {};
+  if (category_id) where.category_id = category_id;
+  if (search) {
+    where[require('sequelize').Op.or] = [
+      { name: { [require('sequelize').Op.iLike]: `%${search}%` } },
+      { sku: { [require('sequelize').Op.iLike]: `%${search}%` } },
+    ];
+  }
+  const products = await Product.findAll({
+    where,
+    include: [{ model: Category, as: 'Category', attributes: ['id', 'name'] }],
+    order: [['id', 'ASC']],
+  });
+  return products.map(p => ({
+    ...p.toJSON(),
+    category_name: p.Category ? p.Category.name : null,
+  }));
+};
+
+const getById = async (id) => {
+  const product = await Product.findByPk(id, {
+    include: [{ model: Category, as: 'Category', attributes: ['id', 'name'] }],
+  });
+  if (!product) throw new AppError('Sáº£n pháº©m khÃ´ng tá»“n táº¡i.', 404);
+  return { ...product.toJSON(), category_name: product.Category ? product.Category.name : null };
+};
+
+const create = async (data) => {
+  const code = await getNextCode('SP', 'seq_product');
+  const product = await Product.create({ ...data, sku: code });
+  return getById(product.id);
+};
+
+const updateById = async (id, data) => {
+  const product = await Product.findByPk(id);
+  if (!product) throw new AppError('Sáº£n pháº©m khÃ´ng tá»“n táº¡i.', 404);
+  await product.update(data);
+  return getById(id);
+};
+
+const deleteById = async (id) => {
+  const product = await Product.findByPk(id);
+  if (!product) throw new AppError('Sáº£n pháº©m khÃ´ng tá»“n táº¡i.', 404);
+  await product.destroy();
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="report.service.js">
+const { query } = require('../config/database');
+
+const getInventorySummary = async () => {
+  const result = await query(`
+    SELECT
+      w.id as warehouse_id, w.name as warehouse_name,
+      COUNT(DISTINCT l.id) as total_bins,
+      COUNT(DISTINCT l.id) FILTER (WHERE l.status = 'FULL') as used_bins,
+      COUNT(DISTINCT p.id) as unique_products,
+      COALESCE(SUM(i.quantity), 0) as total_quantity
+    FROM warehouses w
+    LEFT JOIN locations l ON l.warehouse_id = w.id
+    LEFT JOIN inventory i ON i.warehouse_id = w.id
+    LEFT JOIN products p ON p.id = i.product_id AND i.quantity > 0
+    WHERE w.is_active = true
+    GROUP BY w.id, w.name
+    ORDER BY w.id
+  `);
+  return result.rows;
+};
+
+const getInboundSummary = async (queryParams) => {
+  const { from_date, to_date } = queryParams;
+  const result = await query(`
+    SELECT
+      w.name as warehouse_name,
+      COUNT(io.id) as total_orders,
+      COUNT(io.id) FILTER (WHERE io.status = 'APPROVED') as approved,
+      COUNT(io.id) FILTER (WHERE io.status = 'PENDING') as pending,
+      COUNT(io.id) FILTER (WHERE io.status = 'REJECTED') as rejected,
+      (
+        SELECT COALESCE(SUM(i.requested_quantity), 0)
+        FROM inbound_order_items i
+        JOIN inbound_orders io2 ON i.inbound_order_id = io2.id
+        WHERE io2.warehouse_id = w.id
+          AND io2.status = 'APPROVED'
+          AND ($1::date IS NULL OR io2.created_at >= $1)
+          AND ($2::date IS NULL OR io2.created_at <= $2)
+      ) as total_items_received
+    FROM warehouses w
+    WHERE w.is_active = true
+    GROUP BY w.id, w.name
+    ORDER BY w.id
+  `, [from_date || null, to_date || null]);
+  return result.rows;
+};
+
+const getOutboundSummary = async (queryParams) => {
+  const { from_date, to_date } = queryParams;
+  const result = await query(`
+    SELECT
+      w.name as warehouse_name,
+      COUNT(oo.id) as total_orders,
+      COUNT(oo.id) FILTER (WHERE oo.status = 'COMPLETED') as completed,
+      COUNT(oo.id) FILTER (WHERE oo.status = 'PENDING') as pending,
+      COUNT(oo.id) FILTER (WHERE oo.status = 'APPROVED') as approved,
+      COUNT(oo.id) FILTER (WHERE oo.status = 'REJECTED') as rejected,
+      (
+        SELECT COALESCE(SUM(oi.requested_quantity), 0)
+        FROM outbound_order_items oi
+        JOIN outbound_orders oo2 ON oi.outbound_order_id = oo2.id
+        WHERE oo2.warehouse_id = w.id
+          AND oo2.status = 'COMPLETED'
+          AND ($1::date IS NULL OR oo2.created_at >= $1)
+          AND ($2::date IS NULL OR oo2.created_at <= $2)
+      ) as total_items_shipped
+    FROM warehouses w
+    WHERE w.is_active = true
+    GROUP BY w.id, w.name
+    ORDER BY w.id
+  `, [from_date || null, to_date || null]);
+  return result.rows;
+};
+
+const getSalesSummary = async (queryParams) => {
+  const { from_date, to_date } = queryParams;
+  const result = await query(`
+    SELECT
+      DATE_TRUNC('month', so.created_at) as month,
+      COUNT(so.id) as total_orders,
+      COUNT(so.id) FILTER (WHERE so.status = 'COMPLETED') as completed,
+      COUNT(so.id) FILTER (WHERE so.status = 'PENDING') as pending,
+      COALESCE(SUM(so.total_amount) FILTER (WHERE so.status = 'COMPLETED'), 0) as total_revenue
+    FROM sales_orders so
+    WHERE ($1::date IS NULL OR so.created_at >= $1)
+      AND ($2::date IS NULL OR so.created_at <= $2)
+    GROUP BY DATE_TRUNC('month', so.created_at)
+    ORDER BY month DESC
+    LIMIT 12
+  `, [from_date || null, to_date || null]);
+  return result.rows;
+};
+
+const getDashboardStats = async () => {
+  const [warehouses, inventory, inbound, outbound, sales, products, customers] = await Promise.all([
+    query(`SELECT COUNT(*) as count FROM warehouses WHERE is_active = true`),
+    query(`SELECT COALESCE(SUM(quantity), 0) as total FROM inventory`),
+    query(`SELECT COUNT(*) as count FROM inbound_orders WHERE status = 'PENDING'`),
+    query(`SELECT COUNT(*) as count FROM outbound_orders WHERE status = 'PENDING'`),
+    query(`SELECT COUNT(*) as count FROM sales_orders WHERE status = 'PENDING'`),
+    query(`SELECT COUNT(*) as count FROM products`),
+    query(`SELECT COUNT(*) as count FROM customers`),
+  ]);
+
+  return {
+    total_warehouses: parseInt(warehouses.rows[0].count, 10),
+    total_inventory: parseInt(inventory.rows[0].total, 10),
+    pending_inbound: parseInt(inbound.rows[0].count, 10),
+    pending_outbound: parseInt(outbound.rows[0].count, 10),
+    pending_sales: parseInt(sales.rows[0].count, 10),
+    total_products: parseInt(products.rows[0].count, 10),
+    total_customers: parseInt(customers.rows[0].count, 10),
+  };
+};
+
+module.exports = {
+  getInventorySummary,
+  getInboundSummary,
+  getOutboundSummary,
+  getSalesSummary,
+  getDashboardStats,
+};
+
+</file>
+<file name="sales.service.js">
+const { query, transaction } = require('../config/database');
+const { AppError } = require('../utils/AppError');
+const { getNextCode } = require('../utils/codeGenerator');
+
+const getAll = async (queryParams) => {
+  const { warehouse_id, status, customer_id } = queryParams;
+  const result = await query(`
+    SELECT
+      so.id, so.sales_order_code, so.customer_id, so.warehouse_id,
+      so.total_amount, so.status, so.created_by, so.approved_by,
+      c.name as customer_name, c.customer_code,
+      w.name as warehouse_name,
+      u1.full_name as created_by_name,
+      u2.full_name as approved_by_name,
+      so.created_at, so.updated_at,
+      (
+        SELECT json_agg(json_build_object(
+          'id', si.id, 'product_id', si.product_id,
+          'quantity', si.quantity, 'unit_price', si.unit_price,
+          'product_name', p.name, 'product_sku', p.sku,
+          'line_total', (si.quantity * si.unit_price)
+        ))
+        FROM sales_order_items si
+        JOIN products p ON si.product_id = p.id
+        WHERE si.sales_order_id = so.id
+      ) as items
+    FROM sales_orders so
+    LEFT JOIN customers c ON so.customer_id = c.id
+    LEFT JOIN warehouses w ON so.warehouse_id = w.id
+    LEFT JOIN users u1 ON so.created_by = u1.id
+    LEFT JOIN users u2 ON so.approved_by = u2.id
+    WHERE ($1::int IS NULL OR so.warehouse_id = $1)
+      AND ($2::varchar IS NULL OR so.status = $2)
+      AND ($3::int IS NULL OR so.customer_id = $3)
+    ORDER BY so.created_at DESC
+  `, [warehouse_id || null, status || null, customer_id || null]);
+
+  return result.rows;
+};
+
+const getById = async (id) => {
+  const result = await query(`
+    SELECT so.*, c.name as customer_name, c.customer_code,
+      w.name as warehouse_name,
+      u1.full_name as created_by_name, u2.full_name as approved_by_name
+    FROM sales_orders so
+    LEFT JOIN customers c ON so.customer_id = c.id
+    LEFT JOIN warehouses w ON so.warehouse_id = w.id
+    LEFT JOIN users u1 ON so.created_by = u1.id
+    LEFT JOIN users u2 ON so.approved_by = u2.id
+    WHERE so.id = $1
+  `, [id]);
+
+  if (!result.rows.length) throw new AppError('ÄÆ¡n hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+
+  const itemsResult = await query(`
+    SELECT si.*, p.name as product_name, p.sku as product_sku, p.unit
+    FROM sales_order_items si
+    JOIN products p ON si.product_id = p.id
+    WHERE si.sales_order_id = $1
+  `, [id]);
+
+  return { ...result.rows[0], items: itemsResult.rows };
+};
+
+const create = async (data, userId) => {
+  const { customer_id, warehouse_id, notes, items } = data;
+
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+  if (!items || items.length === 0) throw new AppError('Danh sÃ¡ch sáº£n pháº©m khÃ´ng Ä‘Æ°á»£c trá»‘ng.', 400);
+
+  const t = await transaction();
+
+  try {
+    const soCode = await getNextCode('SO', 'seq_sales_order');
+    let totalAmount = 0;
+
+    for (const item of items) {
+      const priceResult = await t.query(`SELECT price FROM products WHERE id = $1`, [item.product_id]);
+      if (!priceResult.rows.length) throw new AppError(`Sáº£n pháº©m ID ${item.product_id} khÃ´ng tá»“n táº¡i.`, 400);
+      totalAmount += parseFloat(priceResult.rows[0].price) * item.quantity;
+    }
+
+    const orderResult = await t.query(
+      `INSERT INTO sales_orders (sales_order_code, customer_id, warehouse_id, notes, total_amount, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, 'PENDING', $6)
+       RETURNING id, sales_order_code`,
+      [soCode, customer_id || null, warehouse_id, notes || null, totalAmount, userId]
+    );
+    const orderId = orderResult.rows[0].id;
+
+    for (const item of items) {
+      const priceResult = await t.query(`SELECT price FROM products WHERE id = $1`, [item.product_id]);
+      const unitPrice = parseFloat(priceResult.rows[0].price);
+      await t.query(
+        `INSERT INTO sales_order_items (sales_order_id, product_id, quantity, unit_price)
+         VALUES ($1, $2, $3, $4)`,
+        [orderId, item.product_id, item.quantity, unitPrice]
+      );
+    }
+
+    await t.commit();
+    return getById(orderId);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const approve = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('ÄÆ¡n hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ duyá»‡t Ä‘Æ¡n hÃ ng Ä‘ang chá».', 400);
+
+  const t = await transaction();
+
+  try {
+    for (const item of order.items) {
+      const stockResult = await t.query(`
+        SELECT COALESCE(SUM(quantity), 0) as total FROM inventory
+        WHERE product_id = $1 AND warehouse_id = $2
+      `, [item.product_id, order.warehouse_id]);
+
+      if (parseInt(stockResult.rows[0].total, 10) < item.quantity) {
+        throw new AppError(
+          `Sáº£n pháº©m ${item.product_name || item.product_id}: tá»“n kho ${stockResult.rows[0].total}, cáº§n ${item.quantity}.`,
+          400
+        );
+      }
+    }
+
+    await t.query(
+      `UPDATE sales_orders SET status = 'APPROVED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+      [userId, id]
+    );
+
+    const outboundCode = await getNextCode('OTB', 'seq_outbound');
+    const outboundResult = await t.query(
+      `INSERT INTO outbound_orders (outbound_code, warehouse_id, notes, status, created_by)
+       VALUES ($1, $2, $3, 'PENDING', $4)
+       RETURNING id`,
+      [outboundCode, order.warehouse_id, `Tá»± Ä‘á»™ng táº¡o tá»« SO: ${order.sales_order_code}`, userId]
+    );
+    const outboundId = outboundResult.rows[0].id;
+
+    for (const item of order.items) {
+      await t.query(
+        `INSERT INTO outbound_order_items (outbound_order_id, product_id, requested_quantity)
+         VALUES ($1, $2, $3)`,
+        [outboundId, item.product_id, item.quantity]
+      );
+    }
+
+    await t.query(
+      `UPDATE sales_orders SET status = 'PROCESSING', updated_at = NOW() WHERE id = $1`,
+      [id]
+    );
+
+    await t.commit();
+    return getById(id);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const reject = async (id, userId) => {
+  const order = await getById(id);
+  if (!order) throw new AppError('ÄÆ¡n hÃ ng khÃ´ng tá»“n táº¡i.', 404);
+  if (order.status !== 'PENDING') throw new AppError('Chá»‰ tá»« chá»‘i Ä‘Æ¡n hÃ ng Ä‘ang chá».', 400);
+
+  await query(
+    `UPDATE sales_orders SET status = 'REJECTED', approved_by = $1, updated_at = NOW() WHERE id = $2`,
+    [userId, id]
+  );
+
+  return getById(id);
+};
+
+const checkStock = async (items, warehouse_id) => {
+  if (!warehouse_id) throw new AppError('warehouse_id lÃ  báº¯t buá»™c.', 400);
+
+  const results = [];
+  for (const item of items) {
+    const stockResult = await query(`
+      SELECT COALESCE(SUM(i.quantity), 0) as total
+      FROM inventory i
+      WHERE i.product_id = $1 AND i.warehouse_id = $2
+    `, [item.product_id, warehouse_id]);
+
+    const productResult = await query(`SELECT name, sku, unit, price FROM products WHERE id = $1`, [item.product_id]);
+
+    if (productResult.rows.length) {
+      results.push({
+        product_id: item.product_id,
+        product_name: productResult.rows[0].name,
+        sku: productResult.rows[0].sku,
+        unit: productResult.rows[0].unit,
+        price: parseFloat(productResult.rows[0].price),
+        requested: item.quantity,
+        available: parseInt(stockResult.rows[0].total, 10),
+        sufficient: parseInt(stockResult.rows[0].total, 10) >= item.quantity,
+      });
+    }
+  }
+
+  return results;
+};
+
+module.exports = { getAll, getById, create, approve, reject, checkStock };
+
+</file>
+<file name="user.service.js">
+const { User } = require('../models');
+const { AppError } = require('../utils/AppError');
+
+const getAll = async () => {
+  const users = await User.findAll({ attributes: { exclude: ['password_hash'] } });
+  return users;
+};
+
+const getById = async (id) => {
+  const user = await User.findByPk(id, { attributes: { exclude: ['password_hash'] } });
+  if (!user) throw new AppError('NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i.', 404);
+  return user.toJSON();
+};
+
+const updateById = async (id, data) => {
+  const user = await User.findByPk(id);
+  if (!user) throw new AppError('NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i.', 404);
+  await user.update(data);
+  return user.toJSON();
+};
+
+const deleteById = async (id) => {
+  const user = await User.findByPk(id);
+  if (!user) throw new AppError('NgÆ°á»i dÃ¹ng khÃ´ng tá»“n táº¡i.', 404);
+  await user.destroy();
+};
+
+module.exports = { getAll, getById, updateById, deleteById };
+
+</file>
+<file name="warehouse.service.js">
+const { query } = require('../config/database');
+const { Warehouse } = require('../models');
+const { AppError } = require('../utils/AppError');
+
+const ZONES = ['A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P', 'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z'];
+
+function generateBinCodes(totalCapacity) {
+  const bins = [];
+  let count = 0;
+  for (let z = 0; z < ZONES.length && count < totalCapacity; z++) {
+    for (let a = 1; a <= 9 && count < totalCapacity; a++) {
+      for (let r = 1; r <= 9 && count < totalCapacity; r++) {
+        for (let s = 1; s <= 9 && count < totalCapacity; s++) {
+          for (let b = 1; b <= 9 && count < totalCapacity; b++) {
+            bins.push({
+              bin_code: `${ZONES[z]}-A${a}-R${r}-S${s}-B${b}`,
+              zone: ZONES[z],
+              aisle: `A${a}`,
+              rack: `R${r}`,
+              shelf: `S${s}`,
+              bin: `B${b}`,
+            });
+            count++;
+          }
+        }
+      }
+    }
+  }
+  return bins;
+}
+
+const getAll = async () => {
+  const warehouses = await Warehouse.findAll({
+    where: { is_active: true },
+    order: [['id', 'ASC']],
+  });
+
+  const result = await Promise.all(
+    warehouses.map(async (w) => {
+      const usedResult = await query(
+        `SELECT COUNT(*) as used FROM locations WHERE warehouse_id = $1 AND status = 'FULL'`,
+        [w.id]
+      );
+      const totalResult = await query(
+        `SELECT COUNT(*) as total FROM locations WHERE warehouse_id = $1`,
+        [w.id]
+      );
+      const used = parseInt(usedResult.rows[0].used, 10);
+      const total = parseInt(totalResult.rows[0].total, 10);
+      return {
+        ...w.toJSON(),
+        bins_used: used,
+        bins_total: total,
+        capacity_percent: total > 0 ? Math.round((used / total) * 100) : 0,
+      };
+    })
+  );
+
+  return result;
+};
+
+const getById = async (id) => {
+  const warehouse = await Warehouse.findByPk(id);
+  if (!warehouse) throw new AppError('Kho khÃ´ng tá»“n táº¡i.', 404);
+
+  const statsResult = await query(`
+    SELECT
+      COUNT(*) FILTER (WHERE status = 'FULL') as used,
+      COUNT(*) as total
+    FROM locations WHERE warehouse_id = $1
+  `, [id]);
+
+  const used = parseInt(statsResult.rows[0].used, 10);
+  const total = parseInt(statsResult.rows[0].total, 10);
+
+  return {
+    ...warehouse.toJSON(),
+    bins_used: used,
+    bins_total: total,
+    capacity_percent: total > 0 ? Math.round((used / total) * 100) : 0,
+  };
+};
+
+const create = async (data) => {
+  const t = await require('../config/database').transaction();
+
+  try {
+    const warehouse = await Warehouse.create(data, { transaction: t });
+
+    if (data.total_capacity > 0) {
+      const bins = generateBinCodes(data.total_capacity);
+      const locationInserts = bins.map(b => [
+        warehouse.id, b.bin_code, b.zone, b.aisle, b.rack, b.shelf, b.bin,
+      ]);
+
+      for (const row of locationInserts) {
+        await t.query(
+          `INSERT INTO locations (warehouse_id, bin_code, zone, aisle, rack, shelf, bin, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'EMPTY')`,
+          row
+        );
+      }
+    }
+
+    await t.commit();
+    return getById(warehouse.id);
+  } catch (err) {
+    await t.rollback();
+    throw err;
+  }
+};
+
+const updateById = async (id, data) => {
+  const warehouse = await Warehouse.findByPk(id);
+  if (!warehouse) throw new AppError('Kho khÃ´ng tá»“n táº¡i.', 404);
+  await warehouse.update(data);
+  return getById(id);
+};
+
+const deleteById = async (id) => {
+  const warehouse = await Warehouse.findByPk(id);
+  if (!warehouse) throw new AppError('Kho khÃ´ng tá»“n táº¡i.', 404);
+
+  const hasStock = await query(
+    `SELECT 1 FROM locations WHERE warehouse_id = $1 AND status = 'FULL' LIMIT 1`,
+    [id]
+  );
+  if (hasStock.rows.length > 0) {
+    throw new AppError('KhÃ´ng thá»ƒ xÃ³a kho Ä‘ang cÃ³ hÃ ng tá»“n.', 400);
+  }
+
+  await warehouse.update({ is_active: false });
+};
+
+module.exports = { getAll, getById, create, updateById, deleteById };
+
+</file>
+<file name="AppError.js">
+class AppError extends Error {
+  constructor(message, statusCode) {
+    super(message);
+    this.statusCode = statusCode;
+    this.status = `${statusCode}`.startsWith('4') ? 'fail' : 'error';
+    Error.captureStackTrace(this, this.constructor);
+  }
+}
+
+module.exports = { AppError };
+
+</file>
+<file name="codeGenerator.js">
+const { query } = require('../config/database');
+
+async function getNextSequence(seqName) {
+  const result = await query(`SELECT nextval('${seqName}')`);
+  return result.rows[0].nextval;
+}
+
+function formatCode(prefix, seq) {
+  return `${prefix}-${String(seq).padStart(6, '0')}`;
+}
+
+async function getNextCode(prefix, seqName) {
+  const seq = await getNextSequence(seqName);
+  return formatCode(prefix, seq);
+}
+
+module.exports = { getNextSequence, formatCode, getNextCode };
+
+</file>
+<file name="app.js">
+const express = require('express');
+const cors = require('cors');
+const helmet = require('helmet');
+const morgan = require('morgan');
+const config = require('./config');
+const { errorHandler } = require('./middleware/errorHandler');
+
+const app = express();
+
+app.use(helmet());
+app.use(cors({
+  origin: config.corsOrigin,
+  credentials: true,
+}));
+app.use(morgan(config.nodeEnv === 'production' ? 'combined' : 'dev'));
+app.use(express.json({ limit: '10mb' }));
+app.use(express.urlencoded({ extended: true }));
+
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString(), env: config.nodeEnv });
+});
+
+app.use('/api/auth', require('./routes/auth.routes'));
+app.use('/api/users', require('./routes/user.routes'));
+app.use('/api/warehouses', require('./routes/warehouse.routes'));
+app.use('/api/categories', require('./routes/category.routes'));
+app.use('/api/products', require('./routes/product.routes'));
+app.use('/api/customers', require('./routes/customer.routes'));
+app.use('/api/locations', require('./routes/location.routes'));
+app.use('/api/inventory', require('./routes/inventory.routes'));
+app.use('/api/inbound', require('./routes/inbound.routes'));
+app.use('/api/outbound', require('./routes/outbound.routes'));
+app.use('/api/sales', require('./routes/sales.routes'));
+app.use('/api/reports', require('./routes/report.routes'));
+
+app.use((req, res) => {
+  res.status(404).json({ message: 'Route not found' });
+});
+
+app.use(errorHandler);
+
+module.exports = app;
+
+</file>
+<file name="index.js">
+require('dotenv').config();
+const app = require('./app');
+const config = require('./config');
+const sequelize = require('./config/database');
+
+const startServer = async () => {
+  try {
+    await sequelize.authenticate();
+    console.log('[DB] PostgreSQL connected successfully');
+    console.log(`[ENV] Running in ${config.nodeEnv} mode`);
+
+    app.listen(config.port, () => {
+      console.log(`[SERVER] WMS API running on http://localhost:${config.port}`);
+      console.log(`[ENV] CORS origin: ${config.corsOrigin}`);
+    });
+  } catch (err) {
+    console.error('[SERVER] Failed to start:', err.message);
+    process.exit(1);
+  }
+};
+
+startServer();
+
+</file>
